@@ -3,18 +3,27 @@
 // ============================================================
 
 #include <EEPROM.h>
+#include <stddef.h>
 #include "calib.h"
 #include "crc16.h"
 #include "config.h"
 
 #define CALIB_ADDR 0
 
+// offsetof, NOT sizeof-sizeof(crc). The struct has trailing padding
+// (sizeof is 24, crc sits at offset 20), so the naive expression covers
+// the crc field itself: the value computed at save time differs from the
+// one computed at load time, and verification can never succeed.
 static uint16_t calcCrc(const NodeCalib &c) {
-    // Everything except the trailing crc field.
-    return crc16_ccitt((const uint8_t *)&c, sizeof(NodeCalib) - sizeof(uint16_t));
+    return crc16_ccitt((const uint8_t *)&c, offsetof(NodeCalib, crc));
 }
 
 bool calibLoad(NodeCalib &out) {
+    // eeprom_buffered_read_byte() indexes a RAM shadow buffer, it does
+    // not touch flash. Without this fill the buffer is zeroed .bss on a
+    // fresh boot and every load returns zeros.
+    eeprom_buffer_fill();
+
     uint8_t *p = (uint8_t *)&out;
     for (size_t i = 0; i < sizeof(NodeCalib); i++)
         p[i] = eeprom_buffered_read_byte(CALIB_ADDR + i);
@@ -47,8 +56,11 @@ bool calibSave(NodeCalib &c) {
         eeprom_buffered_write_byte(CALIB_ADDR + i, p[i]);
     eeprom_buffer_flush();
 
+    // Re-read through a fresh fill so this verifies what actually landed
+    // in flash, not what we just put in the RAM buffer.
     NodeCalib check;
-    return calibLoad(check) && check.crc == c.crc;
+    return calibLoad(check) && check.crc == c.crc &&
+           check.tuningCap == c.tuningCap && check.watchdog == c.watchdog;
 }
 
 void calibInvalidate() {
