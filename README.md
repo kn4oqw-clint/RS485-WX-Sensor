@@ -89,6 +89,24 @@ pio device monitor   # USB CDC debug output
 Note that `platformio.ini` unsets `-mfloat-abi=hard` and builds `softfp`, because
 the prebuilt BSEC blob for STM32F4 is softfp. Mixing them won't link.
 
+## Board test
+
+There's a second environment that probes every peripheral and reports what it
+finds on the USB console. Use it when bringing up a new board or after rewiring.
+
+```
+pio run -e boardtest -t upload
+pio device monitor -e boardtest
+```
+
+It checks the BME680 and AS3935 chip IDs, hammers the shared SPI bus to prove
+mode switching works, scans I2C, reads the DS3231, listens for NMEA on the GPS
+port, counts PPS edges, and prints a pass/fail summary. Single-key commands from
+the console rerun individual tests; `c` sweeps the AS3935 tuning capacitor and
+tells you which value puts the antenna nearest 500 kHz.
+
+It has no library dependencies, so it builds and runs without BSEC installed.
+
 ## Configuration
 
 Change the node name with `NODE_ID` in [src/main.cpp](src/main.cpp). Set
