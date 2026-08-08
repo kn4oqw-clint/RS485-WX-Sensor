@@ -39,7 +39,7 @@ One JSON object per second on UART2 at 115200 8N1. Debug logging goes to USB CDC
 separately, so the RS485 link stays clean.
 
 ```json
-{"node":"tempest-01","ts":123456,"t":21.44,"h":48.20,"p":1013.2,"gas":128340,"iaq":52.1,"iaq_acc":2,"iaq_valid":1,"co2":612.4,"co2_acc":2,"bvoc":0.634,"bvoc_acc":2,"lx_dist":0,"lx_energy":0,"uptime":123}
+{"node":"wx-01","ts":123456,"t":21.44,"h":48.20,"p":1013.2,"gas":128340,"iaq":52.1,"iaq_acc":2,"iaq_valid":1,"co2":612.4,"co2_acc":2,"bvoc":0.634,"bvoc_acc":2,"lx_dist":0,"lx_energy":0,"uptime":123}
 ```
 
 | Field | Meaning |

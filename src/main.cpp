@@ -1,5 +1,5 @@
 // ============================================================
-// main.cpp — Mock TEMPEST Node
+// main.cpp — RS485 Weather Sensor Node
 // STM32F411CEU6 Black Pill / STM32duino / PlatformIO
 //
 // Architecture:
@@ -27,7 +27,7 @@
 #include "bsec.h"
 
 // ---- Node identity -----------------------------------------
-#define NODE_ID "tempest-01"
+#define NODE_ID "wx-01"
 
 // ---- Debug macros (USB CDC) --------------------------------
 #define DEBUG 1
@@ -94,7 +94,7 @@ void setup() {
     SerialUSB.begin(115200);
     unsigned long t = millis();
     while (!SerialUSB && millis() - t < 3000);
-    DBGLN(F("\n=== Mock TEMPEST Node — JSON/UART2 ==="));
+    DBGLN(F("\n=== RS485 Weather Sensor Node — JSON/UART2 ==="));
     DBGLN(F("Node: " NODE_ID));
 #endif
 
