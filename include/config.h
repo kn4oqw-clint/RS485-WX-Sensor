@@ -94,7 +94,9 @@
 // Calibration runs once per site and is stored in emulated EEPROM, so a
 // brownout costs a few seconds of restart instead of two minutes deaf.
 // Budget below is roughly 15 s antenna + 100 s environment.
-#define AS3935_LCO_GATE_MS          150  // per attempt; up to 3 attempts
+// Edges counted per measurement. A 500 kHz antenna divided by 16 gives
+// 31.25 kHz, so 1000 samples takes about 32 ms.
+#define AS3935_LCO_SAMPLES         1000
 #define AS3935_CAL_NOISE_WINDOW_S     6  // per noise-floor step
 #define AS3935_CAL_NOISE_LIMIT        2  // noise events tolerated per window
 #define AS3935_CAL_WD_WINDOW_S        8  // per watchdog step
