@@ -268,6 +268,21 @@ static void testIRQLine() {
     CONSOLE.println(idle ? F("HIGH  <-- expected LOW when no event pending")
                          : F("LOW   (correct)"));
 
+    // A pending interrupt holds IRQ high until reg 0x03 is read. The
+    // AS3935 raises one after power-up and after the RC calibration
+    // command, so a high line here is expected, not a fault — as long as
+    // reading the register drops it.
+    if (idle == HIGH) {
+        uint8_t src = as3935Read(0x03) & 0x0F;
+        delay(5);
+        int after = digitalRead(PIN_AS3935_IRQ);
+        CONSOLE.print(F("  INT source 0x03 = 0x"));
+        printHex8(src);
+        CONSOLE.print(F("  -> line now "));
+        CONSOLE.println(after ? F("STILL HIGH") : F("LOW (cleared)"));
+        idle = after;
+    }
+
     irqCount = 0;
     attachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ), onLightningIRQ, RISING);
     delay(1000);
@@ -278,7 +293,7 @@ static void testIRQLine() {
 
     char d[48];
     if (idle == HIGH) {
-        record("AS3935 IRQ", WARN, "line stuck high - read INT reg to clear");
+        record("AS3935 IRQ", FAIL, "stuck high after INT read - check PA8");
     } else if (n > 50) {
         snprintf(d, sizeof(d), "%lu irq/s at idle - EMI or bad tuning", n);
         record("AS3935 IRQ", WARN, d);
@@ -438,8 +453,95 @@ static void testI2C() {
 // ============================================================
 // Test 6 — GPS on USART1
 // ============================================================
+// Is anything actually driving the RX line? A byte count of zero cannot
+// tell "module unpowered" from "module talking at the wrong baud", but
+// the electrical state of the pin can.
+//
+//   pulldown HIGH + pullup HIGH -> actively driven high = UART idle. Good.
+//   pulldown LOW  + pullup HIGH -> floating. Nothing connected or no power.
+//   pulldown LOW  + pullup LOW  -> held low. Module in reset, or TX/RX swap.
+static bool probeGPSLine() {
+    pinMode(PA10, INPUT_PULLDOWN);
+    delay(5);
+    int withPD = digitalRead(PA10);
+    pinMode(PA10, INPUT_PULLUP);
+    delay(5);
+    int withPU = digitalRead(PA10);
+    pinMode(PA10, INPUT);
+    delay(5);
+
+    uint32_t trans = 0;
+    int last = digitalRead(PA10);
+    uint32_t start = millis();
+    while (millis() - start < 250) {
+        int now = digitalRead(PA10);
+        if (now != last) { trans++; last = now; }
+    }
+
+    CONSOLE.print(F("  PA10 with pulldown="));
+    CONSOLE.print(withPD ? F("HIGH") : F("LOW"));
+    CONSOLE.print(F("  with pullup="));
+    CONSOLE.println(withPU ? F("HIGH") : F("LOW"));
+    CONSOLE.print(F("  edges in 250 ms: "));
+    CONSOLE.println(trans);
+
+    if (withPD == HIGH && withPU == HIGH) {
+        CONSOLE.println(F("  -> line driven high: module powered, TX wired"));
+        return true;
+    }
+    if (withPD == LOW && withPU == HIGH) {
+        CONSOLE.println(F("  -> line FLOATING: no 5V, or TX not connected"));
+        return false;
+    }
+    CONSOLE.println(F("  -> line held LOW: module in reset, or TX/RX swapped"));
+    return false;
+}
+
+// If the line is alive but 9600 gives nothing, the module may have been
+// left configured at another rate. Sweep the common ones.
+static uint32_t sweepGPSBaud() {
+    static const uint32_t bauds[] = {9600, 4800, 38400, 57600, 115200};
+    CONSOLE.println(F("  sweeping baud rates"));
+
+    for (uint8_t i = 0; i < 5; i++) {
+        SerialGPS.end();
+        SerialGPS.setRx(PA10);
+        SerialGPS.setTx(PA9);
+        SerialGPS.begin(bauds[i]);
+        delay(30);
+        while (SerialGPS.available()) SerialGPS.read();
+
+        uint16_t dollars = 0, bytes = 0;
+        uint32_t start = millis();
+        while (millis() - start < 1500) {
+            while (SerialGPS.available()) {
+                char c = SerialGPS.read();
+                bytes++;
+                if (c == '$') dollars++;
+            }
+        }
+        CONSOLE.print(F("    "));
+        CONSOLE.print(bauds[i]);
+        CONSOLE.print(F(": "));
+        CONSOLE.print(bytes);
+        CONSOLE.print(F(" bytes, "));
+        CONSOLE.print(dollars);
+        CONSOLE.println(F(" '$'"));
+
+        if (dollars >= 2) return bauds[i];
+    }
+    return 0;
+}
+
 static void testGPS() {
     banner("GPS GT-U7 (USART1, RX PA10 / TX PA9)");
+
+    // Pin the peripheral explicitly. PB6/PB7 are also valid USART1 pins on
+    // this part and they are our I2C bus — never let pinmap order decide.
+    SerialGPS.setRx(PA10);
+    SerialGPS.setTx(PA9);
+
+    bool lineAlive = probeGPSLine();
 
     SerialGPS.begin(GPS_BAUD);
     delay(50);
@@ -494,7 +596,17 @@ static void testGPS() {
 
     char d[48];
     if (bytes == 0) {
-        record("GPS", FAIL, "silent - check 5V rail and TX->PA10");
+        if (!lineAlive) {
+            record("GPS", FAIL, "RX line dead - no 5V or TX not wired");
+        } else {
+            uint32_t found = sweepGPSBaud();
+            if (found) {
+                snprintf(d, sizeof(d), "talks at %lu baud, not 9600", found);
+                record("GPS", WARN, d);
+            } else {
+                record("GPS", FAIL, "line alive but silent at every baud");
+            }
+        }
     } else if (sentences == 0) {
         snprintf(d, sizeof(d), "%lu bytes but no NMEA - baud wrong?", bytes);
         record("GPS", FAIL, d);
@@ -665,6 +777,43 @@ static void sweepLCO() {
 }
 
 // ============================================================
+// Jump to the STM32 system DFU bootloader on command.
+//
+// Saves a trip to the board for every reflash: no BOOT0 jumper, no reset
+// button. The part re-enumerates as 0483:df11 and dfu-util can take it
+// from there. Only in the test firmware — the flight build must never
+// expose a way to brick itself remotely.
+// ============================================================
+static void jumpToBootloader() {
+    CONSOLE.println(F("  entering DFU bootloader — port will disappear"));
+    CONSOLE.flush();
+    delay(200);
+
+    typedef void (*bootJump_t)(void);
+    const uint32_t sysMemBase = 0x1FFF0000; // STM32F4 system memory
+
+    HAL_RCC_DeInit();
+    HAL_DeInit();
+    SysTick->CTRL = 0;
+    SysTick->LOAD = 0;
+    SysTick->VAL  = 0;
+
+    for (uint8_t i = 0; i < 8; i++) {
+        NVIC->ICER[i] = 0xFFFFFFFF;
+        NVIC->ICPR[i] = 0xFFFFFFFF;
+    }
+    __disable_irq();
+    __HAL_SYSCFG_REMAPMEMORY_SYSTEMFLASH();
+
+    bootJump_t bootJump = (bootJump_t)(*((uint32_t *)(sysMemBase + 4)));
+    __set_MSP(*(uint32_t *)sysMemBase);
+    __enable_irq();
+    bootJump();
+
+    while (1) { }                           // unreachable
+}
+
+// ============================================================
 // Summary
 // ============================================================
 static void printSummary() {
@@ -696,6 +845,7 @@ static void printSummary() {
     CONSOLE.println();
     CONSOLE.println(F(" Commands:  r = rerun    i = I2C scan    l = AS3935 regs"));
     CONSOLE.println(F("            g = GPS raw  c = LCO sweep   t = DS3231 time"));
+    CONSOLE.println(F("            b = reboot into DFU bootloader (no BOOT0)"));
     CONSOLE.println(F("============================================================"));
 }
 
@@ -759,6 +909,7 @@ void loop() {
                 break;
             }
             case 'c': sweepLCO(); break;
+            case 'b': jumpToBootloader(); break;
             case 'l': {
                 banner("AS3935 registers");
                 for (uint8_t r = 0x00; r <= 0x08; r++) {
