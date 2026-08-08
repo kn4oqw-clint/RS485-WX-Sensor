@@ -533,6 +533,60 @@ static void seedRTC() {
     CONSOLE.println(F("    back to 2000-01-01 or OSF set -> cell dead/absent"));
 }
 
+// Set the clock from a host-supplied string, so the RTC holds real UTC
+// while the GPS is out of action. Format, terminated by newline:
+//
+//     s2026-08-08 15:52:00
+//
+static void setRTCFromHost() {
+    char buf[32] = {0};
+    uint8_t n = 0;
+    uint32_t start = millis();
+
+    while (millis() - start < 3000 && n < sizeof(buf) - 1) {
+        if (!CONSOLE.available()) continue;
+        char c = CONSOLE.read();
+        if (c == '\n' || c == '\r') break;
+        buf[n++] = c;
+    }
+
+    int year, mon, day, hh, mm, ss;
+    if (sscanf(buf, "%d-%d-%d %d:%d:%d", &year, &mon, &day, &hh, &mm, &ss) != 6) {
+        CONSOLE.print(F("  bad format: '"));
+        CONSOLE.print(buf);
+        CONSOLE.println(F("' — expected s2026-08-08 15:52:00"));
+        return;
+    }
+
+    Wire.beginTransmission(ADDR_DS3231);
+    Wire.write(0x00);
+    Wire.write(dec2bcd(ss));
+    Wire.write(dec2bcd(mm));
+    Wire.write(dec2bcd(hh));
+    Wire.write(1);
+    Wire.write(dec2bcd(day));
+    Wire.write(dec2bcd(mon));
+    Wire.write(dec2bcd(year % 100));
+    if (Wire.endTransmission() != 0) {
+        CONSOLE.println(F("  write failed"));
+        return;
+    }
+
+    Wire.beginTransmission(ADDR_DS3231);
+    Wire.write(0x0F);
+    Wire.endTransmission();
+    Wire.requestFrom((uint8_t)ADDR_DS3231, (uint8_t)1);
+    uint8_t status = Wire.read();
+    Wire.beginTransmission(ADDR_DS3231);
+    Wire.write(0x0F);
+    Wire.write(status & 0x7F);
+    Wire.endTransmission();
+
+    CONSOLE.print(F("  RTC set to "));
+    CONSOLE.print(buf);
+    CONSOLE.println(F(" UTC, OSF cleared"));
+}
+
 // ============================================================
 // Test 6 — GPS on USART1
 // ============================================================
@@ -897,11 +951,23 @@ static void sweepLCO() {
 // ============================================================
 static void jumpToBootloader() {
     CONSOLE.println(F("  entering DFU bootloader — port will disappear"));
+    CONSOLE.println(F("  (if it does not come back, power cycle the board)"));
     CONSOLE.flush();
     delay(200);
 
     typedef void (*bootJump_t)(void);
     const uint32_t sysMemBase = 0x1FFF0000; // STM32F4 system memory
+
+    // Force a USB disconnect before jumping. Without this the host keeps
+    // the old CDC device open, ignores the bootloader's enumeration, and
+    // the board simply vanishes from the bus — which is exactly what
+    // happened the one time this was tried without it. Driving D+ (PA12)
+    // low for ~80 ms makes the host tear the device down first.
+    pinMode(PA12, OUTPUT);
+    digitalWrite(PA12, LOW);
+    delay(80);
+    pinMode(PA12, INPUT);
+    delay(20);
 
     HAL_RCC_DeInit();
     HAL_DeInit();
@@ -957,6 +1023,7 @@ static void printSummary() {
     CONSOLE.println(F(" Commands:  r = rerun    i = I2C scan    l = AS3935 regs"));
     CONSOLE.println(F("            g = GPS raw  c = LCO sweep   t = DS3231 time"));
     CONSOLE.println(F("            w = seed RTC + clear OSF (backup cell test)"));
+    CONSOLE.println(F("            s = set RTC from host: s2026-08-08 15:52:00"));
     CONSOLE.println(F("            b = reboot into DFU bootloader (no BOOT0)"));
     CONSOLE.println(F("============================================================"));
 }
@@ -1023,6 +1090,7 @@ void loop() {
             case 'c': sweepLCO(); break;
             case 'b': jumpToBootloader(); break;
             case 'w': seedRTC(); break;
+            case 's': banner("DS3231 set from host"); setRTCFromHost(); break;
             case 'l': {
                 banner("AS3935 registers");
                 for (uint8_t r = 0x00; r <= 0x08; r++) {
