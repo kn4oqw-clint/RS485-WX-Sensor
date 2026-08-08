@@ -15,77 +15,116 @@ static uint8_t minStrikesCode(uint8_t n) {
 }
 
 // ---- Stage 1: antenna --------------------------------------
-static bool tuneAntenna(AS3935SPI &dev, NodeCalib &out, Print *log) {
-    if (log) log->println(F("  [1/2] antenna (AS3935MI)"));
+//
+// The LCO is driven through the library's public API, but counted here.
+// AS3935MI::calibrateResonanceFrequency() sees zero edges on this board
+// — its ISR never fires — while this loop counts 1000 every time on the
+// same pin. Rather than keep chasing that, drive the device with the
+// library (which gets the register semantics right) and do the counting
+// locally, where it is known to work.
+//
+// Fixed sample count, timed. NOT edges-in-a-window: a window that misses
+// edges reports a LOWER frequency, which is indistinguishable from a
+// genuinely detuned antenna. This way a failure times out and reports
+// zero instead of a plausible lie.
+static volatile uint32_t edgeCount = 0;
+static volatile uint32_t calEndUs  = 0;
+static const uint32_t    CAL_SAMPLES = 1000;
 
-    // The library drives the IRQ pin and manages its own ISR during
-    // measurement, so nothing of ours may be attached here.
+static void onEdge() {
+    if (edgeCount < CAL_SAMPLES) edgeCount++;
+    else if (calEndUs == 0)      calEndUs = micros();
+}
+
+static uint32_t measureLco(AS3935SPI &dev, uint8_t cap) {
+    detachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ));
+
+    // Registers with no ISR attached: servicing a 31 kHz interrupt while
+    // driving the bus is what the library's own comments warn against.
+    dev.displayLcoOnIrq(false);
+    dev.writeAntennaTuning(cap);
+    dev.writeDivisionRatio(AS3935MI::AS3935_DR_16);
+    dev.displayLcoOnIrq(true);
+
+    pinMode(PIN_AS3935_IRQ, INPUT);     // plain INPUT: the AS3935 drives it
+    delay(20);                          // let the oscillator settle
+
+    IWatchdog.reload();
+    edgeCount = 0;
+    calEndUs  = 0;
+    uint32_t startUs = micros();
+    attachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ), onEdge, RISING);
+
+    uint32_t deadline = millis() + 600; // covers even /128 at 3.9 kHz
+    while (calEndUs == 0 && (int32_t)(millis() - deadline) < 0) { }
+
+    detachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ));
+    IWatchdog.reload();
+    dev.displayLcoOnIrq(false);
+
+    if (calEndUs == 0) return 0;
+    uint32_t elapsedUs = calEndUs - startUs;
+    if (elapsedUs == 0) return 0;
+
+    return (uint32_t)(((uint64_t)CAL_SAMPLES * 1000000ULL * 16ULL) / elapsedUs);
+}
+
+static bool tuneAntenna(AS3935SPI &dev, NodeCalib &out, Print *log) {
+    if (log) log->println(F("  [1/2] antenna sweep"));
+
     dev.setInterruptMode(AS3935MI::AS3935_INTERRUPT_DETACHED);
 
-    // NOTE: EXTI priority is raised globally via -D EXTI_IRQ_PRIO=0 in
-    // platformio.ini, NOT here. STM32duino re-applies EXTI_IRQ_PRIO
-    // inside every attachInterrupt(), so setting it around this call
-    // would be silently undone the moment the library attaches its own
-    // ISR. See the comment in platformio.ini.
+    uint8_t  bestCap = 0;
+    uint32_t bestHz  = 0;
+    uint32_t bestErr = 0xFFFFFFFF;
 
-    // checkIRQ() is only a sanity gate, and a strict one: 128 edges
-    // inside a 20 ms timeout. Report it, but do not let it veto the
-    // calibration — the real measurement uses far longer timeouts and
-    // can succeed where this fails.
-    IWatchdog.reload();
-    bool irqSeen = dev.checkIRQ();
-    if (log) {
-        log->print(F("    checkIRQ: "));
-        log->println(irqSeen ? F("LCO present") : F("no edges seen (advisory)"));
-    }
+    for (uint8_t cap = 0; cap < 16; cap++) {
+        uint32_t hz = 0;
+        for (uint8_t attempt = 0; attempt < 3 && hz == 0; attempt++)
+            hz = measureLco(dev, cap);
 
-    // Sweep every tuning cap. The library's default narrows the search by
-    // interpolating between cap 0 and cap 15, which assumes a monotonic
-    // response — but this antenna sits at the end of its trim range, so
-    // the interpolation has nothing useful to work with.
-    dev.setCalibrateAllAntCap(true);
-
-    IWatchdog.reload();
-    int32_t freq = 0;
-    bool ok = dev.calibrateResonanceFrequency(freq);
-    IWatchdog.reload();
-
-    if (log) {
-        // Per-cap results, so a bad sweep is diagnosable in one run.
-        for (uint8_t c = 0; c < 16; c++) {
-            int32_t f = dev.getAntCapFrequency(c);
-            if (f <= 0) continue;
-            log->print(F("      cap ")); log->print(c);
-            log->print(F(" -> "));       log->print(f);
-            log->println(F(" Hz"));
+        uint32_t err = hz > 500000UL ? hz - 500000UL : 500000UL - hz;
+        if (log) {
+            log->print(F("    cap ")); log->print(cap);
+            log->print(F("  "));       log->print(hz);
+            log->print(F(" Hz  err "));
+            log->print(hz ? (err * 100.0f) / 500000.0f : 100.0f, 2);
+            log->println(F(" %"));
         }
+        if (hz > 0 && err < bestErr) { bestErr = err; bestCap = cap; bestHz = hz; }
     }
 
-    out.tuningCap = dev.readAntennaTuning();
-    out.lcoHz     = (freq > 0) ? (uint32_t)freq : 0;
+    out.tuningCap = bestCap;
+    out.lcoHz     = bestHz;
+    dev.writeAntennaTuning(bestCap);
 
+    if (bestHz == 0) {
+        if (log) log->println(F("    NO LCO OUTPUT — antenna or IRQ wiring"));
+        return false;
+    }
+
+    float errPct = (bestErr * 100.0f) / 500000.0f;
     if (log) {
-        log->print(F("    cap ")); log->print(out.tuningCap);
-        log->print(F(" -> "));     log->print(out.lcoHz);
-        log->print(F(" Hz  err "));
-        long err = (long)out.lcoHz - 500000L;
-        if (err < 0) err = -err;
-        log->print((err * 100.0f) / 500000.0f, 2);
+        log->print(F("    best cap ")); log->print(bestCap);
+        log->print(F(" -> "));          log->print(bestHz);
+        log->print(F(" Hz, err "));     log->print(errPct, 2);
         log->println(F(" %"));
     }
 
-    if (!ok && log) {
-        log->println(F("    OUT OF SPEC — distance estimates unreliable."));
-        log->println(F("    Caps only lower the frequency; if the antenna"));
-        log->println(F("    already sits low there is no trim left."));
-    }
-
-    // RCO calibration must follow resonance calibration, per the
+    // RCO calibration must follow the resonance calibration, per the
     // datasheet — the RC oscillators are trimmed against the antenna.
     if (!dev.calibrateRCO() && log)
         log->println(F("    RCO calibration reported failure"));
 
-    return ok;
+    if (errPct > AS3935_LCO_TOLERANCE * 100.0f) {
+        if (log) {
+            log->println(F("    OUT OF SPEC — distance estimates unreliable."));
+            log->println(F("    Caps only lower the frequency; if the antenna"));
+            log->println(F("    already sits low there is no trim left."));
+        }
+        return false;
+    }
+    return true;
 }
 
 // ---- Stage 2: environment ----------------------------------
