@@ -25,11 +25,17 @@ static void countEdges(uint16_t gateMs) {
 }
 
 uint32_t as3935MeasureLco(AS3935 &dev, uint8_t tuningCap, uint16_t gateMs) {
+    // Toggling DISP_LCO off and straight back on does not reliably
+    // restart the oscillator: measured back-to-back passes alternate
+    // between a good count and exactly zero. Give it a clean off period
+    // and a generous settle before counting.
+    dev.maskRegisterBits(AS3935_REG_DISP_LCO, 0x7F, 0x00);   // ensure off
+    delay(10);
     dev.maskRegisterBits(AS3935_REG_DISP_LCO, 0xF0, tuningCap & 0x0F);
-    delay(3);
+    delay(10);
 
     dev.maskRegisterBits(AS3935_REG_DISP_LCO, 0x7F, 0x80);   // DISP_LCO on
-    delay(20);                                               // let it settle
+    delay(50);                                               // let it settle
 
     countEdges(gateMs);
 
@@ -54,19 +60,23 @@ static bool tuneAntenna(AS3935 &dev, NodeCalib &out, Print *log) {
     uint32_t bestErr = 0xFFFFFFFF;
 
     for (uint8_t cap = 0; cap < 16; cap++) {
-        // Two passes averaged: the gate is short and a single pass can
-        // be a count off, which is 160 Hz of apparent error.
-        uint32_t a = as3935MeasureLco(dev, cap, AS3935_LCO_GATE_MS);
-        uint32_t rawA = edgeCount;
-        uint32_t b = as3935MeasureLco(dev, cap, AS3935_LCO_GATE_MS);
-        (void)rawA;
-        uint32_t hz = (a + b) / 2;
+        // Retry rather than average. A failed pass reads exactly zero,
+        // and averaging a good pass with a zero halves the answer — which
+        // is how a healthy 488 kHz antenna came back as 244 kHz garbage.
+        // Take the best of up to three attempts instead.
+        uint32_t hz = 0;
+        uint32_t raw = 0;
+        for (uint8_t attempt = 0; attempt < 3; attempt++) {
+            uint32_t m = as3935MeasureLco(dev, cap, AS3935_LCO_GATE_MS);
+            if (m > hz) { hz = m; raw = edgeCount; }
+            if (hz > 0) break;          // a good reading is enough
+        }
 
         uint32_t err = hz > AS3935_LCO_TARGET_HZ ? hz - AS3935_LCO_TARGET_HZ
                                                  : AS3935_LCO_TARGET_HZ - hz;
         if (log) {
             log->print(F("    cap ")); log->print(cap);
-            log->print(F("  edges ")); log->print(edgeCount);
+            log->print(F("  edges ")); log->print(raw);
             log->print(F("  ")); log->print(hz);
             log->print(F(" Hz  err "));
             log->print(hz ? (err * 100.0f) / AS3935_LCO_TARGET_HZ : 100.0f, 2);

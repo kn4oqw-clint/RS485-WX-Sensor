@@ -94,7 +94,7 @@
 // Calibration runs once per site and is stored in emulated EEPROM, so a
 // brownout costs a few seconds of restart instead of two minutes deaf.
 // Budget below is roughly 15 s antenna + 100 s environment.
-#define AS3935_LCO_GATE_MS          250  // per pass; two passes per cap
+#define AS3935_LCO_GATE_MS          150  // per attempt; up to 3 attempts
 #define AS3935_CAL_NOISE_WINDOW_S     6  // per noise-floor step
 #define AS3935_CAL_NOISE_LIMIT        2  // noise events tolerated per window
 #define AS3935_CAL_WD_WINDOW_S        8  // per watchdog step
