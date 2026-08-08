@@ -784,6 +784,240 @@ static void testGPS() {
     }
 }
 
+static volatile uint32_t ppsCount = 0;
+static void onPPS() { ppsCount++; }
+
+// ============================================================
+// UBX helpers
+// ============================================================
+static void sendUBX(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len) {
+    uint8_t head[6] = {0xB5, 0x62, cls, id, (uint8_t)(len & 0xFF), (uint8_t)(len >> 8)};
+    uint8_t ckA = 0, ckB = 0;
+
+    for (uint8_t i = 2; i < 6; i++) { ckA += head[i]; ckB += ckA; }
+    for (uint16_t i = 0; i < len; i++) { ckA += payload[i]; ckB += ckA; }
+
+    SerialGPS.write(head, 6);
+    if (len) SerialGPS.write(payload, len);
+    SerialGPS.write(ckA);
+    SerialGPS.write(ckB);
+    SerialGPS.flush();
+}
+
+// Force a free-running 1 Hz timepulse so PPS can be verified without a fix.
+//
+// CFG-TP5 carries two pulse configs: freqPeriod applies when the receiver is
+// NOT locked to GNSS, freqPeriodLock when it is. The default unlocked value
+// is zero, which is exactly why a module with no fix shows no PPS. Setting
+// the unlocked value to 1 Hz proves out the wiring and the EXTI path now,
+// and the locked config still takes over once a fix arrives.
+static void forcePPSUnlocked() {
+    uint8_t p[32] = {0};
+
+    p[0]  = 0;                      // tpIdx = TIMEPULSE
+    p[1]  = 0;                      // version
+                                    // p[2..3] reserved
+                                    // p[4..5] antCableDelay = 0
+                                    // p[6..7] rfGroupDelay  = 0
+    p[8]  = 1;                      // freqPeriod = 1 Hz (unlocked)
+    p[12] = 1;                      // freqPeriodLock = 1 Hz (locked)
+
+    // pulseLenRatio = 100000 us = 100 ms high time, both states
+    uint32_t plen = 100000;
+    memcpy(&p[16], &plen, 4);
+    memcpy(&p[20], &plen, 4);
+                                    // p[24..27] userConfigDelay = 0
+
+    // active | lockGnssFreq | lockedOtherSet | isFreq | isLength |
+    // alignToTow | polarity(rising)
+    uint32_t flags = 0x7F;
+    memcpy(&p[28], &flags, 4);
+
+    sendUBX(0x06, 0x31, p, 32);
+}
+
+static void testPPSForced() {
+    banner("PPS forced 1 Hz (no fix required)");
+
+    SerialGPS.setRx(PA10);
+    SerialGPS.setTx(PA9);
+    SerialGPS.begin(GPS_BAUD);
+    delay(50);
+
+    CONSOLE.println(F("  sending UBX-CFG-TP5 (1 Hz while unlocked)"));
+    forcePPSUnlocked();
+    delay(500);
+
+    pinMode(PIN_GPS_PPS, INPUT);
+    ppsCount = 0;
+    attachInterrupt(digitalPinToInterrupt(PIN_GPS_PPS), onPPS, RISING);
+    CONSOLE.println(F("  counting rising edges for 6 s"));
+    delay(6000);
+    detachInterrupt(digitalPinToInterrupt(PIN_GPS_PPS));
+
+    CONSOLE.print(F("  edges: "));
+    CONSOLE.println(ppsCount);
+
+    if (ppsCount >= 5 && ppsCount <= 7) {
+        CONSOLE.println(F("  PPS WIRING CONFIRMED — 1 Hz on PA0, EXTI works."));
+        CONSOLE.println(F("  Accuracy is meaningless until locked, but the"));
+        CONSOLE.println(F("  signal path is proven."));
+    } else if (ppsCount == 0) {
+        CONSOLE.println(F("  still nothing. Either PA0 is not wired to the"));
+        CONSOLE.println(F("  module's PPS pin, or the module rejected the"));
+        CONSOLE.println(F("  config (not a real u-blox?). Probe the pin:"));
+        probePin(PIN_GPS_PPS, "PA0 (PPS in)");
+    } else {
+        CONSOLE.println(F("  unexpected rate — check for bounce or EMI"));
+    }
+}
+
+// ============================================================
+// GPS sky view — what the antenna can actually hear.
+// Satellites tracked with usable SNR is the number that decides whether a
+// fix is coming; a receiver by a window often sees birds but never gets
+// enough of them above ~30 dBHz to solve.
+// ============================================================
+static void gpsSkyView() {
+    banner("GPS sky view (30 s)");
+
+    SerialGPS.setRx(PA10);
+    SerialGPS.setTx(PA9);
+    SerialGPS.begin(GPS_BAUD);
+    delay(50);
+    while (SerialGPS.available()) SerialGPS.read();
+
+    char    line[100];
+    uint8_t len = 0;
+    uint8_t inView = 0, bestSnr = 0, usable = 0;
+    bool    fix = false;
+
+    uint32_t start = millis();
+    while (millis() - start < 30000) {
+        while (SerialGPS.available()) {
+            char c = SerialGPS.read();
+            if (c == '\n') {
+                line[len] = '\0';
+                if (strstr(line, "GSV")) {
+                    // $xxGSV,numMsg,msgNum,numSV, then svid,elev,azim,snr x4
+                    char *f[24] = {0};
+                    uint8_t nf = 0;
+                    for (char *p = line; *p && nf < 24; p++)
+                        if (*p == ',') { *p = '\0'; f[nf++] = p + 1; }
+                    if (nf >= 3 && f[2]) inView = atoi(f[2]);
+                    uint8_t thisMsg = 0;
+                    for (uint8_t i = 6; i < nf; i += 4) {
+                        if (!f[i]) continue;
+                        uint8_t snr = atoi(f[i]);
+                        if (snr > bestSnr) bestSnr = snr;
+                        if (snr >= 30) thisMsg++;
+                    }
+                    usable += thisMsg;
+                } else if (strstr(line, "GGA")) {
+                    char *p = line;
+                    for (uint8_t k = 0; k < 6 && p; k++) p = strchr(p + 1, ',');
+                    if (p && p[1] != ',' && p[1] != '0') fix = true;
+                }
+                len = 0;
+            } else if (c != '\r' && len < sizeof(line) - 1) {
+                line[len++] = c;
+            }
+        }
+    }
+
+    CONSOLE.print(F("  satellites in view: ")); CONSOLE.println(inView);
+    CONSOLE.print(F("  best SNR: "));           CONSOLE.print(bestSnr);
+    CONSOLE.println(F(" dBHz"));
+    CONSOLE.print(F("  fix: "));
+    CONSOLE.println(fix ? F("YES") : F("no"));
+    CONSOLE.println();
+
+    if (inView == 0) {
+        CONSOLE.println(F("  Nothing heard. Antenna is blind — check the"));
+        CONSOLE.println(F("  patch antenna connector, or it needs real sky."));
+    } else if (bestSnr < 25) {
+        CONSOLE.println(F("  Birds are visible but far too weak to solve."));
+        CONSOLE.println(F("  A window is usually not enough. Needs open sky."));
+    } else if (bestSnr < 35) {
+        CONSOLE.println(F("  Marginal. A fix may come but could take many"));
+        CONSOLE.println(F("  minutes — cold start needs ~30 s of clean data"));
+        CONSOLE.println(F("  per satellite to download the almanac."));
+    } else {
+        CONSOLE.println(F("  Signal is good. A fix should arrive shortly."));
+    }
+}
+
+// ============================================================
+// AS3935 EMI soak — what the environment looks like at current tuning.
+// Disturber floods are the single most common AS3935 complaint, and they
+// are a siting/tuning problem, not a firmware one.
+// ============================================================
+static void as3935Soak(uint32_t seconds) {
+    banner("AS3935 noise soak");
+    CONSOLE.print(F("  listening "));
+    CONSOLE.print(seconds);
+    CONSOLE.println(F(" s at current tuning"));
+
+    as3935Mask(0x00, 0xC1, (AS3935_OUTDOOR_MODE ? 0x0E : 0x12) << 1);
+    as3935Mask(0x01, 0x8F, AS3935_NOISE_FLOOR << 4);
+    as3935Mask(0x01, 0xF0, AS3935_WATCHDOG_THRESH & 0x0F);
+    as3935Mask(0x02, 0xF0, AS3935_SPIKE_REJECT & 0x0F);
+    as3935Read(0x03);                       // drain anything pending
+
+    uint32_t noise = 0, dist = 0, strikes = 0;
+    irqCount = 0;
+    attachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ), onLightningIRQ, RISING);
+
+    uint32_t start = millis();
+    uint32_t lastReport = start;
+    while (millis() - start < seconds * 1000UL) {
+        if (irqCount) {
+            irqCount = 0;
+            delay(3);                       // datasheet: 2 ms before INT read
+            uint8_t src = as3935Read(0x03) & 0x0F;
+            if (src == 0x01) noise++;
+            else if (src == 0x04) dist++;
+            else if (src == 0x08) {
+                strikes++;
+                CONSOLE.print(F("  LIGHTNING dist="));
+                CONSOLE.print(as3935Read(0x07) & 0x3F);
+                CONSOLE.println(F(" km"));
+            }
+        }
+        if (millis() - lastReport >= 10000) {
+            lastReport = millis();
+            CONSOLE.print(F("  t="));
+            CONSOLE.print((millis() - start) / 1000);
+            CONSOLE.print(F("s  noise="));   CONSOLE.print(noise);
+            CONSOLE.print(F(" disturber=")); CONSOLE.print(dist);
+            CONSOLE.print(F(" strikes="));   CONSOLE.println(strikes);
+        }
+    }
+    detachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ));
+
+    CONSOLE.println();
+    CONSOLE.print(F("  TOTAL over "));  CONSOLE.print(seconds);
+    CONSOLE.print(F(" s: noise="));     CONSOLE.print(noise);
+    CONSOLE.print(F(" disturber="));    CONSOLE.print(dist);
+    CONSOLE.print(F(" strikes="));      CONSOLE.println(strikes);
+
+    float dpm = (dist * 60.0f) / seconds;
+    CONSOLE.print(F("  disturbers/min: "));
+    CONSOLE.println(dpm, 1);
+
+    if (noise > seconds / 2) {
+        CONSOLE.println(F("  NOISE FLOOR TOO LOW — raise AS3935_NOISE_FLOOR."));
+    } else if (dpm > 10.0f) {
+        CONSOLE.println(F("  Heavy disturbers. Raise AS3935_WATCHDOG_THRESH,"));
+        CONSOLE.println(F("  and suspect the GPS or a switching supply first."));
+    } else if (dpm > 2.0f) {
+        CONSOLE.println(F("  Moderate disturbers — acceptable, but re-check"));
+        CONSOLE.println(F("  in the final enclosure."));
+    } else {
+        CONSOLE.println(F("  Quiet. Current tuning looks good for this site."));
+    }
+}
+
 // ============================================================
 // Test 7 — PPS on PA0
 //
@@ -791,8 +1025,6 @@ static void testGPS() {
 // shorts it to GND. Do not press KEY during this test or the edge count is
 // meaningless. See the warning in config.h.
 // ============================================================
-static volatile uint32_t ppsCount = 0;
-static void onPPS() { ppsCount++; }
 
 static void testPPS() {
     banner("GPS PPS (PA0)");
@@ -1024,6 +1256,8 @@ static void printSummary() {
     CONSOLE.println(F("            g = GPS raw  c = LCO sweep   t = DS3231 time"));
     CONSOLE.println(F("            w = seed RTC + clear OSF (backup cell test)"));
     CONSOLE.println(F("            s = set RTC from host: s2026-08-08 15:52:00"));
+    CONSOLE.println(F("            p = force PPS 1Hz (no fix needed)  v = sky view"));
+    CONSOLE.println(F("            n = AS3935 noise soak (120 s)"));
     CONSOLE.println(F("            b = reboot into DFU bootloader (no BOOT0)"));
     CONSOLE.println(F("============================================================"));
 }
@@ -1090,6 +1324,9 @@ void loop() {
             case 'c': sweepLCO(); break;
             case 'b': jumpToBootloader(); break;
             case 'w': seedRTC(); break;
+            case 'p': testPPSForced(); break;
+            case 'v': gpsSkyView(); break;
+            case 'n': as3935Soak(120); break;
             case 's': banner("DS3231 set from host"); setRTCFromHost(); break;
             case 'l': {
                 banner("AS3935 registers");
