@@ -43,7 +43,12 @@ static uint32_t measureLco(AS3935SPI &dev, uint8_t cap) {
     // driving the bus is what the library's own comments warn against.
     dev.displayLcoOnIrq(false);
     dev.writeAntennaTuning(cap);
-    dev.writeDivisionRatio(AS3935MI::AS3935_DR_16);
+    // Divider 32, not 16. At /16 the LCO lands at ~31 kHz and roughly 5%
+    // of edges are lost to ISR overhead, which under-reports the
+    // frequency and pushed a healthy antenna below the 3.5% window.
+    // /32 halves the interrupt rate. AS3935MI defaults to /32 on
+    // non-ESP platforms for exactly this reason.
+    dev.writeDivisionRatio(AS3935MI::AS3935_DR_32);
     dev.displayLcoOnIrq(true);
 
     pinMode(PIN_AS3935_IRQ, INPUT);     // plain INPUT: the AS3935 drives it
@@ -66,13 +71,19 @@ static uint32_t measureLco(AS3935SPI &dev, uint8_t cap) {
     uint32_t elapsedUs = calEndUs - startUs;
     if (elapsedUs == 0) return 0;
 
-    return (uint32_t)(((uint64_t)CAL_SAMPLES * 1000000ULL * 16ULL) / elapsedUs);
+    return (uint32_t)(((uint64_t)CAL_SAMPLES * 1000000ULL * 32ULL) / elapsedUs);
 }
 
 static bool tuneAntenna(AS3935SPI &dev, NodeCalib &out, Print *log) {
     if (log) log->println(F("  [1/2] antenna sweep"));
 
     dev.setInterruptMode(AS3935MI::AS3935_INTERRUPT_DETACHED);
+
+    // Discard a warm-up reading. The first measurement after the
+    // oscillator is first enabled reads far low — cap 0 came back at
+    // 29 kHz against a true ~460 kHz — and without this the sweep
+    // permanently writes off whichever cap happens to be measured first.
+    measureLco(dev, 0);
 
     uint8_t  bestCap = 0;
     uint32_t bestHz  = 0;
