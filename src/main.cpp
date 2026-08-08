@@ -30,6 +30,8 @@
 #include "rtc.h"
 #include "gps.h"
 #include "frame.h"
+#include "calib.h"
+#include "as3935_cal.h"
 #include "stats.h"
 
 // ---- Debug -------------------------------------------------
@@ -50,6 +52,8 @@ static RollingStats<SAMPLE_WINDOW_LEN> wTemp, wRh, wPress;
 // ---- Health ------------------------------------------------
 static bool bmeOk = false, as3935Ok = false, rtcOk = false;
 static bool gpsSyncedThisSession = false;
+static NodeCalib calib;
+static bool calibValid = false;
 
 // ---- Lightning ---------------------------------------------
 static volatile bool lightningIrq = false;
@@ -303,17 +307,53 @@ void setup() {
 
     // ---- AS3935 ----
     as3935Ok = lightning.begin();
+    pinMode(PIN_AS3935_IRQ, INPUT);
+
     if (as3935Ok) {
-        if (AS3935_OUTDOOR_MODE) lightning.setOutdoor(); else lightning.setIndoor();
-        lightning.setNoiseFloor(AS3935_NOISE_FLOOR);
-        lightning.setWatchdogThreshold(AS3935_WATCHDOG_THRESH);
-        lightning.setSpikeRejection(AS3935_SPIKE_REJECT);
-        lightning.setMinLightningEvents(AS3935_MIN_STRIKES);
         DBGLN(F("AS3935 OK"));
+
+        // Calibration is a two-minute measurement of THIS site, so the
+        // watchdog has to be running through it and the lightning ISR
+        // must stay detached — the calibration code drives that pin.
+        IWatchdog.begin(IWDG_TIMEOUT_MS * 1000UL);
+
+        float dieT = 20.0f;
+        rtcDieTemp(dieT);
+
+        calibValid = calibLoad(calib);
+        if (calibValid && calibShouldRefresh(calib, (int8_t)dieT)) {
+            DBGLN(F("stored calibration is from a very different temperature"));
+            calibValid = false;
+        }
+
+        if (calibValid) {
+            DBG(F("calibration loaded: cap=")); DBG(calib.tuningCap);
+            DBG(F(" lco="));    DBG(calib.lcoHz);
+            DBG(F(" floor="));  DBG(calib.noiseFloor);
+            DBG(F(" wd="));     DBGLN(calib.watchdog);
+            as3935ApplyCalib(lightning, calib);
+        } else {
+            DBGLN(F("no usable calibration — running site calibration"));
+            memset(&calib, 0, sizeof(calib));
+            bool antennaOk = as3935Calibrate(lightning, calib,
+                                             DEBUG ? &CONSOLE : (Print *)NULL);
+            calib.tempC    = (int8_t)dieT;
+            calib.unixTime = rtcOk ? rtcUnix() : 0;
+
+            if (calibSave(calib)) {
+                calibValid = true;
+                DBGLN(F("calibration saved"));
+            } else {
+                DBGLN(F("calibration save FAILED — will re-run next boot"));
+            }
+            if (!antennaOk)
+                DBGLN(F("WARNING: antenna out of spec, distances unreliable"));
+        }
     } else {
         DBGLN(F("AS3935 FAILED"));
     }
-    pinMode(PIN_AS3935_IRQ, INPUT);
+
+    // Lightning ISR attaches only after calibration is finished with the pin.
     attachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ), onLightningIrq, RISING);
 
     // ---- GPS ----
@@ -336,8 +376,9 @@ void setup() {
     lastSampleMs = millis();
     lastReportMs = millis();
 
-    // Watchdog last, so a slow init cannot trip it.
-    IWatchdog.begin(IWDG_TIMEOUT_MS * 1000UL);
+    // Already started before calibration if the AS3935 came up; IWDG
+    // cannot be re-initialised once running.
+    if (!as3935Ok) IWatchdog.begin(IWDG_TIMEOUT_MS * 1000UL);
     DBGLN(F("running\n"));
 }
 

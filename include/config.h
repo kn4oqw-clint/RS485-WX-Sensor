@@ -90,6 +90,21 @@
 #define AS3935_TUNING_CAP       0   // 0..15, from the LCO sweep
 #define AS3935_MASK_DISTURBER   0   // 1 = stop reporting disturbers
 
+// ---- Site calibration -------------------------------------
+// Calibration runs once per site and is stored in emulated EEPROM, so a
+// brownout costs a few seconds of restart instead of two minutes deaf.
+// Budget below is roughly 15 s antenna + 100 s environment.
+#define AS3935_LCO_GATE_MS          250  // per pass; two passes per cap
+#define AS3935_CAL_NOISE_WINDOW_S     6  // per noise-floor step
+#define AS3935_CAL_NOISE_LIMIT        2  // noise events tolerated per window
+#define AS3935_CAL_WD_WINDOW_S        8  // per watchdog step
+#define AS3935_CAL_DISTURBER_PER_MIN  4.0f
+
+// Re-run calibration if the die temperature has moved this far from the
+// stored value. Antenna resonance drifts with temperature, and this
+// antenna already sits at the end of its trim range.
+#define CALIB_TEMP_DELTA_C           25
+
 // LCO target for antenna calibration: 500 kHz +/- 3.5%
 #define AS3935_LCO_TARGET_HZ    500000
 #define AS3935_LCO_TOLERANCE    0.035f
