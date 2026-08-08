@@ -172,7 +172,18 @@ static void testAS3935() {
 
     as3935Write(0x3C, 0x96);            // preset defaults
     delay(3);
-    as3935Write(0x3D, 0x96);            // calibrate RC oscillators
+
+    // CALIB_RCO is not complete until TRCO has been displayed on the IRQ
+    // pin and switched off again. Issue the command alone and the chip
+    // leaves IRQ asserted with an INT source of 0x00 — which reads exactly
+    // like a stuck line and cannot be cleared by reading reg 0x03.
+    as3935Write(0x3D, 0x96);            // CALIB_RCO
+    delay(3);
+    as3935Mask(0x08, 0xDF, 0x20);       // DISP_TRCO on
+    delay(3);
+    as3935Mask(0x08, 0xDF, 0x00);       // DISP_TRCO off
+    delay(3);
+    as3935Read(0x03);                   // drain the calibration interrupt
     delay(3);
 
     uint8_t afe = as3935Read(0x00);
@@ -272,15 +283,22 @@ static void testIRQLine() {
     // AS3935 raises one after power-up and after the RC calibration
     // command, so a high line here is expected, not a fault — as long as
     // reading the register drops it.
-    if (idle == HIGH) {
+    //
+    // The datasheet mandates a 2 ms wait between the IRQ edge and the INT
+    // register read. Read it earlier and you get 0x00 back AND the latch
+    // does not clear, which looks exactly like a wiring fault. Wait first,
+    // and retry — a reset+calibrate can leave more than one pending.
+    for (uint8_t attempt = 0; attempt < 3 && idle == HIGH; attempt++) {
+        delay(3);
         uint8_t src = as3935Read(0x03) & 0x0F;
-        delay(5);
-        int after = digitalRead(PIN_AS3935_IRQ);
-        CONSOLE.print(F("  INT source 0x03 = 0x"));
+        delay(3);
+        idle = digitalRead(PIN_AS3935_IRQ);
+        CONSOLE.print(F("  INT read "));
+        CONSOLE.print(attempt + 1);
+        CONSOLE.print(F(": 0x03 = 0x"));
         printHex8(src);
-        CONSOLE.print(F("  -> line now "));
-        CONSOLE.println(after ? F("STILL HIGH") : F("LOW (cleared)"));
-        idle = after;
+        CONSOLE.print(F("  -> line "));
+        CONSOLE.println(idle ? F("still high") : F("LOW (cleared)"));
     }
 
     irqCount = 0;
@@ -451,6 +469,71 @@ static void testI2C() {
 }
 
 // ============================================================
+// Seed the DS3231 and clear OSF.
+//
+// OSF (status bit 7) is sticky: once the oscillator has stopped, it stays
+// set forever until software clears it. So "OSF set" on a clock that has
+// never been initialised tells you nothing about the backup cell — you
+// have to clear it, pull all power, and see whether it comes back.
+//
+// Build time is only as good as the build machine's clock and ignores
+// timezone. Fine for a retention test; GPS is the real time source.
+// ============================================================
+static uint8_t dec2bcd(uint8_t v) { return ((v / 10) << 4) | (v % 10); }
+
+static void seedRTC() {
+    banner("DS3231 seed + OSF clear");
+
+    static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    char mstr[8] = {0};
+    int  day = 1, year = 2000, hh = 0, mm = 0, ss = 0;
+
+    sscanf(__DATE__, "%7s %d %d", mstr, &day, &year);
+    sscanf(__TIME__, "%d:%d:%d", &hh, &mm, &ss);
+
+    const char *pos = strstr(months, mstr);
+    uint8_t mon = pos ? ((pos - months) / 3) + 1 : 1;
+
+    Wire.beginTransmission(ADDR_DS3231);
+    Wire.write(0x00);
+    Wire.write(dec2bcd(ss));
+    Wire.write(dec2bcd(mm));
+    Wire.write(dec2bcd(hh));            // 24-hour: bit6 clear
+    Wire.write(1);                      // day of week, unused
+    Wire.write(dec2bcd(day));
+    Wire.write(dec2bcd(mon));           // century bit clear
+    Wire.write(dec2bcd(year % 100));
+    if (Wire.endTransmission() != 0) {
+        CONSOLE.println(F("  write failed"));
+        return;
+    }
+
+    // Clear OSF so a later power cycle tells us something.
+    Wire.beginTransmission(ADDR_DS3231);
+    Wire.write(0x0F);
+    Wire.endTransmission();
+    Wire.requestFrom((uint8_t)ADDR_DS3231, (uint8_t)1);
+    uint8_t status = Wire.read();
+
+    Wire.beginTransmission(ADDR_DS3231);
+    Wire.write(0x0F);
+    Wire.write(status & 0x7F);
+    Wire.endTransmission();
+
+    CONSOLE.print(F("  set to "));
+    CONSOLE.print(year);   CONSOLE.print('-');
+    CONSOLE.print(mon);    CONSOLE.print('-');
+    CONSOLE.print(day);    CONSOLE.print(' ');
+    CONSOLE.print(hh);     CONSOLE.print(':');
+    CONSOLE.print(mm);     CONSOLE.print(':');
+    CONSOLE.println(ss);
+    CONSOLE.println(F("  OSF cleared."));
+    CONSOLE.println(F("  Now: unplug ALL power for 60 s, replug, press 't'."));
+    CONSOLE.println(F("    time retained + OSF clear -> backup cell good"));
+    CONSOLE.println(F("    back to 2000-01-01 or OSF set -> cell dead/absent"));
+}
+
+// ============================================================
 // Test 6 — GPS on USART1
 // ============================================================
 // Is anything actually driving the RX line? A byte count of zero cannot
@@ -460,40 +543,68 @@ static void testI2C() {
 //   pulldown HIGH + pullup HIGH -> actively driven high = UART idle. Good.
 //   pulldown LOW  + pullup HIGH -> floating. Nothing connected or no power.
 //   pulldown LOW  + pullup LOW  -> held low. Module in reset, or TX/RX swap.
-static bool probeGPSLine() {
-    pinMode(PA10, INPUT_PULLDOWN);
+// Returns: 2 = driven high (idle UART), 1 = driven low, 0 = floating.
+static uint8_t probePin(uint32_t pin, const char *label) {
+    pinMode(pin, INPUT_PULLDOWN);
     delay(5);
-    int withPD = digitalRead(PA10);
-    pinMode(PA10, INPUT_PULLUP);
+    int withPD = digitalRead(pin);
+    pinMode(pin, INPUT_PULLUP);
     delay(5);
-    int withPU = digitalRead(PA10);
-    pinMode(PA10, INPUT);
+    int withPU = digitalRead(pin);
+    pinMode(pin, INPUT);
     delay(5);
 
     uint32_t trans = 0;
-    int last = digitalRead(PA10);
+    int last = digitalRead(pin);
     uint32_t start = millis();
     while (millis() - start < 250) {
-        int now = digitalRead(PA10);
+        int now = digitalRead(pin);
         if (now != last) { trans++; last = now; }
     }
 
-    CONSOLE.print(F("  PA10 with pulldown="));
-    CONSOLE.print(withPD ? F("HIGH") : F("LOW"));
-    CONSOLE.print(F("  with pullup="));
-    CONSOLE.println(withPU ? F("HIGH") : F("LOW"));
-    CONSOLE.print(F("  edges in 250 ms: "));
-    CONSOLE.println(trans);
+    CONSOLE.print(F("  "));
+    CONSOLE.print(label);
+    CONSOLE.print(F(": pulldown="));
+    CONSOLE.print(withPD ? F("HIGH") : F("LOW "));
+    CONSOLE.print(F(" pullup="));
+    CONSOLE.print(withPU ? F("HIGH") : F("LOW "));
+    CONSOLE.print(F(" edges="));
+    CONSOLE.print(trans);
 
     if (withPD == HIGH && withPU == HIGH) {
-        CONSOLE.println(F("  -> line driven high: module powered, TX wired"));
-        return true;
+        CONSOLE.println(F("  -> DRIVEN HIGH (something is talking)"));
+        return 2;
     }
-    if (withPD == LOW && withPU == HIGH) {
-        CONSOLE.println(F("  -> line FLOATING: no 5V, or TX not connected"));
+    if (withPD == LOW && withPU == LOW) {
+        CONSOLE.println(F("  -> DRIVEN LOW"));
+        return 1;
+    }
+    CONSOLE.println(F("  -> FLOATING (open circuit)"));
+    return 0;
+}
+
+static bool probeGPSLine() {
+    // PA10 is where the GPS TX should land. PA9 is our TX to the module —
+    // probing it as an input catches a TX/RX swap at the module end, which
+    // would show the GPS driving PA9 instead.
+    uint8_t rx = probePin(PA10, "PA10 (GPS TX in) ");
+    uint8_t tx = probePin(PA9,  "PA9  (our TX out)");
+
+    if (rx == 2) return true;
+
+    if (tx == 2) {
+        CONSOLE.println(F("  !! PA9 is driven but PA10 is not — the module's"));
+        CONSOLE.println(F("  !! TX is on OUR TX pin. TX/RX are swapped."));
         return false;
     }
-    CONSOLE.println(F("  -> line held LOW: module in reset, or TX/RX swapped"));
+
+    CONSOLE.println(F("  PA10 floats with the module powered, so nothing is"));
+    CONSOLE.println(F("  driving it. In order of likelihood:"));
+    CONSOLE.println(F("    1. open joint / broken wire on the TX line"));
+    CONSOLE.println(F("    2. GPS TX pin dead (module reworked?)"));
+    CONSOLE.println(F("    3. module has power but is not running"));
+    CONSOLE.println(F("  Isolate: wire GPS TX straight to a USB-serial"));
+    CONSOLE.println(F("  adapter at 9600 and see if NMEA appears there."));
     return false;
 }
 
@@ -845,6 +956,7 @@ static void printSummary() {
     CONSOLE.println();
     CONSOLE.println(F(" Commands:  r = rerun    i = I2C scan    l = AS3935 regs"));
     CONSOLE.println(F("            g = GPS raw  c = LCO sweep   t = DS3231 time"));
+    CONSOLE.println(F("            w = seed RTC + clear OSF (backup cell test)"));
     CONSOLE.println(F("            b = reboot into DFU bootloader (no BOOT0)"));
     CONSOLE.println(F("============================================================"));
 }
@@ -910,6 +1022,7 @@ void loop() {
             }
             case 'c': sweepLCO(); break;
             case 'b': jumpToBootloader(); break;
+            case 'w': seedRTC(); break;
             case 'l': {
                 banner("AS3935 registers");
                 for (uint8_t r = 0x00; r <= 0x08; r++) {
