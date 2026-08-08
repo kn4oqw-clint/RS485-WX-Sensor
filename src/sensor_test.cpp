@@ -105,9 +105,10 @@ static bool rawForcedRead() {
     rslt = bme68x_set_op_mode(BME68X_FORCED_MODE, &rawDev);
     CONSOLE.print(F("  set_op_mode -> ")); CONSOLE.println(rslt);
 
-    uint32_t dur = bme68x_get_meas_dur(BME68X_FORCED_MODE, &rawConf, &rawDev) + hConf.heatr_dur * 1000;
-    delayMicroseconds(dur);
-    delay(10);
+    uint32_t dur = bme68x_get_meas_dur(BME68X_FORCED_MODE, &rawConf, &rawDev)
+                   + (uint32_t)hConf.heatr_dur * 1000UL;
+    CONSOLE.print(F("  waiting ")); CONSOLE.print(dur / 1000); CONSOLE.println(F(" ms"));
+    delay(dur / 1000 + 30);
 
     struct bme68x_data d;
     uint8_t n = 0;
@@ -150,9 +151,8 @@ static bool rawForcedRead() {
         bme68x_set_heatr_conf(BME68X_FORCED_MODE, &hConf, &rawDev);
         if (bme68x_set_op_mode(BME68X_FORCED_MODE, &rawDev) != BME68X_OK) continue;
         uint32_t dly = bme68x_get_meas_dur(BME68X_FORCED_MODE, &rawConf, &rawDev)
-                       + hConf.heatr_dur * 1000;
-        delayMicroseconds(dly);
-        delay(20);
+                       + (uint32_t)hConf.heatr_dur * 1000UL;
+        delay(dly / 1000 + 30);
 
         struct bme68x_data s;
         uint8_t sn = 0;
@@ -167,13 +167,32 @@ static bool rawForcedRead() {
         CONSOLE.print(F(": heat_stab=")); CONSOLE.print(stab ? 1 : 0);
         CONSOLE.print(F("  gas_valid=")); CONSOLE.print((s.status & 0x20) ? 1 : 0);
         CONSOLE.print(F("  gas=")); CONSOLE.print(s.gas_resistance, 0);
-        CONSOLE.print(F(" ohm  T=")); CONSOLE.print(s.temperature, 2);
+        CONSOLE.print(F(" ohm  res_heat=")); CONSOLE.print(s.res_heat);
+        CONSOLE.print(F(" idac=")); CONSOLE.print(s.idac);
+        CONSOLE.print(F(" gas_idx=")); CONSOLE.print(s.gas_index);
+        CONSOLE.print(F(" T=")); CONSOLE.print(s.temperature, 2);
         CONSOLE.println(F(" C"));
         delay(200);
     }
 
     CONSOLE.print(F("\n  heat_stab set in ")); CONSOLE.print(stabCount);
     CONSOLE.println(F("/10 measurements"));
+
+    // Heater calibration coefficients — blank values here mean the part
+    // cannot compute a heater drive, which points at a counterfeit or
+    // damaged die rather than a supply problem.
+    uint8_t gh1=0, gh2l=0, gh2h=0, gh3=0, rhr=0, rhv=0;
+    rawSpiRead(0xED | 0x80, &gh1,  1, NULL);
+    rawSpiRead(0xEB | 0x80, &gh2l, 1, NULL);
+    rawSpiRead(0xEC | 0x80, &gh2h, 1, NULL);
+    rawSpiRead(0xEE | 0x80, &gh3,  1, NULL);
+    rawSpiRead(0x02 | 0x80, &rhr,  1, NULL);
+    rawSpiRead(0x00 | 0x80, &rhv,  1, NULL);
+    CONSOLE.print(F("  heater calib: par_gh1=")); CONSOLE.print(gh1);
+    CONSOLE.print(F(" par_gh2=")); CONSOLE.print((int16_t)((gh2h << 8) | gh2l));
+    CONSOLE.print(F(" par_gh3=")); CONSOLE.print((int8_t)gh3);
+    CONSOLE.print(F(" res_heat_range=")); CONSOLE.print((rhr & 0x30) >> 4);
+    CONSOLE.print(F(" res_heat_val=")); CONSOLE.println((int8_t)rhv);
 
     if (stabCount == 0) {
         CONSOLE.println(F("  HEATER NEVER STABILISED. The gas hotplate is not"));
