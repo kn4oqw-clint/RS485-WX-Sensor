@@ -20,6 +20,10 @@
 // At the default divider of 16 a healthy 500 kHz antenna appears as
 // 31.25 kHz, so 1000 samples completes in about 32 ms.
 static volatile uint32_t edgeCount  = 0;
+uint32_t as3935LastEdges   = 0;     // diagnostics for the last measurement
+uint32_t as3935LastUs      = 0;
+uint8_t  as3935LastReg03   = 0;
+uint8_t  as3935LastReg08   = 0;
 static volatile uint32_t calEndUs   = 0;
 static uint32_t          calTarget  = AS3935_LCO_SAMPLES;
 
@@ -39,8 +43,16 @@ uint32_t as3935MeasureLco(AS3935 &dev, uint8_t tuningCap, uint16_t /*unused*/) {
 
     dev.maskRegisterBits(AS3935_REG_DISP_LCO, 0x7F, 0x00);   // LCO off
     dev.maskRegisterBits(AS3935_REG_DISP_LCO, 0xF0, tuningCap & 0x0F);
-    dev.maskRegisterBits(AS3935_REG_INT_MASK_ANT, 0x3F, 0x00);  // LCO_FDIV = /16
+
+    // LCO_FDIV lives in reg 0x03 bits [7:6]: 00=/16, 01=/32, 10=/64,
+    // 11=/128. Write it, then READ IT BACK — an assumed divider silently
+    // scales every reading, and a /64 result looks like a real but wrong
+    // frequency rather than an error.
+    dev.maskRegisterBits(AS3935_REG_INT_MASK_ANT, 0x3F, 0x00);
     dev.maskRegisterBits(AS3935_REG_DISP_LCO, 0x7F, 0x80);   // LCO on
+
+    as3935LastReg03 = dev.readRegister(AS3935_REG_INT_MASK_ANT);
+    as3935LastReg08 = dev.readRegister(AS3935_REG_DISP_LCO);
 
     // Plain INPUT, never INPUT_PULLUP: the AS3935 drives this pin.
     pinMode(PIN_AS3935_IRQ, INPUT);
@@ -53,8 +65,9 @@ uint32_t as3935MeasureLco(AS3935 &dev, uint8_t tuningCap, uint16_t /*unused*/) {
     attachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ), onEdge, RISING);
 
     // Expected duration at the target frequency, with generous slack.
-    uint32_t expectedMs = (calTarget * AS3935_LCO_DIVIDER) / 500UL;   // ms
-    uint32_t deadline   = millis() + expectedMs * 4 + 30;
+    // Long enough for the slowest divider (/128 -> ~3.9 kHz -> 256 ms),
+    // so a timeout means "no signal", not "wrong divider".
+    uint32_t deadline = millis() + 600;
     while (calEndUs == 0 && (int32_t)(millis() - deadline) < 0) { }
 
     detachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ));
@@ -62,14 +75,17 @@ uint32_t as3935MeasureLco(AS3935 &dev, uint8_t tuningCap, uint16_t /*unused*/) {
 
     dev.maskRegisterBits(AS3935_REG_DISP_LCO, 0x7F, 0x00);   // LCO off
 
+    as3935LastEdges = edgeCount;
+    as3935LastUs    = calEndUs ? (calEndUs - startUs) : 0;
+
     if (calEndUs == 0) return 0;                // never reached the count
 
     uint32_t elapsedUs = calEndUs - startUs;
     if (elapsedUs == 0) return 0;
 
-    // samples/second * divider = antenna frequency
-    return (uint32_t)(((uint64_t)calTarget * 1000000ULL * AS3935_LCO_DIVIDER)
-                      / elapsedUs);
+    // Divider read back from the device, not assumed.
+    uint32_t divider = 16UL << ((as3935LastReg03 >> 6) & 0x03);
+    return (uint32_t)(((uint64_t)calTarget * 1000000ULL * divider) / elapsedUs);
 }
 
 // Counts interrupts by source over a window at the current settings.
@@ -99,6 +115,11 @@ static bool tuneAntenna(AS3935 &dev, NodeCalib &out, Print *log) {
                                                  : AS3935_LCO_TARGET_HZ - hz;
         if (log) {
             log->print(F("    cap ")); log->print(cap);
+            log->print(F("  r03=0x")); log->print(as3935LastReg03, HEX);
+            log->print(F(" r08=0x")); log->print(as3935LastReg08, HEX);
+            log->print(F(" div=")); log->print(16UL << ((as3935LastReg03 >> 6) & 3));
+            log->print(F(" edges=")); log->print(as3935LastEdges);
+            log->print(F(" us=")); log->print(as3935LastUs);
             log->print(F("  ")); log->print(hz);
             log->print(F(" Hz  err "));
             log->print(hz ? (err * 100.0f) / AS3935_LCO_TARGET_HZ : 100.0f, 2);

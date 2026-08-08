@@ -319,9 +319,15 @@ static void runCalibration() {
     calib.tempC    = (int8_t)dieT;
     calib.unixTime = rtcOk ? rtcUnix() : 0;
 
-    calibValid = calibSave(calib);
-    DBGLN(calibValid ? F("calibration saved") : F("calibration save FAILED"));
-    if (!antennaOk) DBGLN(F("WARNING: antenna out of spec"));
+    if (!antennaOk) {
+        DBGLN(F("antenna measurement FAILED — not saving"));
+        calib.tuningCap = AS3935_TUNING_CAP;
+        as3935ApplyCalib(lightning, calib);
+        calibValid = false;
+    } else {
+        calibValid = calibSave(calib);
+        DBGLN(calibValid ? F("calibration saved") : F("calibration save FAILED"));
+    }
 
     attachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ), onLightningIrq, RISING);
     lastSampleMs = millis();
