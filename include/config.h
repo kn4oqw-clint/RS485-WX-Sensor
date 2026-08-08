@@ -70,7 +70,19 @@
 #define AS3935_WATCHDOG_THRESH  2   // 0..15, raise if disturbers flood
 #define AS3935_SPIKE_REJECT     2   // 0..15, raise to reject non-lightning
 #define AS3935_MIN_STRIKES      1   // 1, 5, 9 or 16
-#define AS3935_TUNING_CAP       0   // 0..15, set from the LCO sweep result
+// Bench sweep 2026-08-08 (USB power, no enclosure):
+//   cap=0 -> 488640 Hz (2.27% low)   <-- best, in spec
+//   cap=4 -> 482880 Hz (3.42% low)   <-- last value still in spec
+//   cap=5 and above are OUT of spec
+//
+// !! The optimum sits at the END STOP. Tuning caps only ADD capacitance,
+// !! which only LOWERS the frequency, and the antenna already resonates
+// !! BELOW 500 kHz with zero cap. So we can correct upward drift, but a
+// !! downward shift — metal enclosure, moisture, cold — cannot be trimmed
+// !! out in firmware at all. Re-run the 'c' sweep in the final enclosure
+// !! at the install site. If it lands under 482.5 kHz there, it is a
+// !! hardware problem: different antenna or a physically smaller cap.
+#define AS3935_TUNING_CAP       0   // 0..15, from the LCO sweep
 #define AS3935_MASK_DISTURBER   0   // 1 = stop reporting disturbers
 
 // LCO target for antenna calibration: 500 kHz +/- 3.5%
