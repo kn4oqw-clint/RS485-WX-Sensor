@@ -210,21 +210,15 @@ static bool rawForcedRead() {
     CONSOLE.print(F("\n  heat_stab set in ")); CONSOLE.print(stabCount);
     CONSOLE.println(F("/10 measurements"));
 
-    // Heater calibration coefficients — blank values here mean the part
-    // cannot compute a heater drive, which points at a counterfeit or
-    // damaged die rather than a supply problem.
-    uint8_t gh1=0, gh2l=0, gh2h=0, gh3=0, rhr=0, rhv=0;
-    rawSpiRead(0xED | 0x80, &gh1,  1, NULL);
-    rawSpiRead(0xEB | 0x80, &gh2l, 1, NULL);
-    rawSpiRead(0xEC | 0x80, &gh2h, 1, NULL);
-    rawSpiRead(0xEE | 0x80, &gh3,  1, NULL);
-    rawSpiRead(0x02 | 0x80, &rhr,  1, NULL);
-    rawSpiRead(0x00 | 0x80, &rhv,  1, NULL);
-    CONSOLE.print(F("  heater calib: par_gh1=")); CONSOLE.print(gh1);
-    CONSOLE.print(F(" par_gh2=")); CONSOLE.print((int16_t)((gh2h << 8) | gh2l));
-    CONSOLE.print(F(" par_gh3=")); CONSOLE.print((int8_t)gh3);
-    CONSOLE.print(F(" res_heat_range=")); CONSOLE.print((rhr & 0x30) >> 4);
-    CONSOLE.print(F(" res_heat_val=")); CONSOLE.println((int8_t)rhv);
+    // Heater calibration, taken from the struct the driver already parsed.
+    // Reading these registers directly is wrong: the BME680 splits its
+    // register map across two SPI memory pages and raw reads that ignore
+    // the page bit land somewhere else entirely.
+    CONSOLE.print(F("  heater calib: par_gh1=")); CONSOLE.print(rawDev.calib.par_gh1);
+    CONSOLE.print(F(" par_gh2=")); CONSOLE.print(rawDev.calib.par_gh2);
+    CONSOLE.print(F(" par_gh3=")); CONSOLE.print(rawDev.calib.par_gh3);
+    CONSOLE.print(F(" res_heat_range=")); CONSOLE.print(rawDev.calib.res_heat_range);
+    CONSOLE.print(F(" res_heat_val=")); CONSOLE.println(rawDev.calib.res_heat_val);
 
     if (stabCount == 0) {
         CONSOLE.println(F("  HEATER NEVER STABILISED. The gas hotplate is not"));
