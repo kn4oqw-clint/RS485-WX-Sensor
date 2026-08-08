@@ -42,7 +42,14 @@
 // that would instantiate USART1 twice and the IRQ handlers will fight.
 #define SerialGPS       Serial1
 #define GPS_BAUD        9600
-#define PIN_GPS_PPS     PA0     // EXTI0
+
+// !! PA0 IS ALSO THE ONBOARD KEY BUTTON on the WeAct Black Pill. The button
+// !! shorts PA0 straight to GND, so it fights the GPS PPS driver whenever it
+// !! is pressed, and injects a false edge on release. Harmless as long as
+// !! nobody presses it — but if PPS discipline ever misbehaves, or the time
+// !! jumps by exactly one second, suspect this first. Moving PPS to a free
+// !! EXTI pin (PB1 is unused) removes the conflict permanently.
+#define PIN_GPS_PPS     PA0     // EXTI0 — see KEY button warning above
 #define PIN_GPS_PWR     PA1     // power gate MOSFET — NOT POPULATED YET
 
 // ---- Uplink to hub (Cat6 run) on USART2 --------------------
@@ -86,3 +93,32 @@
 #define I2C_TIMEOUT_MS          50
 #define SPI_TIMEOUT_MS          50
 #define IWDG_TIMEOUT_MS         8000
+
+// ============================================================
+// OPEN HARDWARE ITEMS — firmware cannot fix these. Kept here
+// because this header is the file everyone opens.
+// ============================================================
+//
+// [ ] PA0 / KEY button collides with GPS PPS. See the warning above.
+//
+// [ ] TVS diodes on both ends of the Cat6 UART run. Not installed. This
+//     is lightning country and the run is unbalanced 3.3V — the whole
+//     reason RS485 died here was a driver stuck enabled, and a surge on
+//     an unprotected line takes the MCU with it next time.
+//
+// [ ] DS3231 mini modules usually ship with a LIR2032 and a trickle
+//     charger sized for 5V. On a 3V3 rail it will never charge, and the
+//     cell slowly dies. Verify the cell type; a CR2032 with the charge
+//     resistor removed is the safe fallback.
+//
+// [ ] GPS power gate MOSFET on PA1 not populated. Until it is, GPS low
+//     power means UBX-RXM-PMREQ software sleep only.
+//
+// [ ] Whenever the GPS is asleep or unpowered, drive USART1 TX (PA9) to
+//     input/high-Z first and restore it on wake. Left driven, it
+//     back-powers the module through its ESD diodes.
+//
+// [ ] INA226 for solar/battery telemetry not wired. Joins I2C1 at 0x40.
+//
+// [ ] RS485/MAX485 from the old design is DEAD — driver stuck enabled,
+//     part burned out. Do not resurrect it.

@@ -509,12 +509,18 @@ static void testGPS() {
 
 // ============================================================
 // Test 7 — PPS on PA0
+//
+// PA0 is ALSO the onboard KEY button on the WeAct Black Pill — the button
+// shorts it to GND. Do not press KEY during this test or the edge count is
+// meaningless. See the warning in config.h.
 // ============================================================
 static volatile uint32_t ppsCount = 0;
 static void onPPS() { ppsCount++; }
 
 static void testPPS() {
     banner("GPS PPS (PA0)");
+    CONSOLE.println(F("  NOTE: PA0 is also the onboard KEY button — do not"));
+    CONSOLE.println(F("        press it during this test."));
 
     pinMode(PIN_GPS_PPS, INPUT);
     ppsCount = 0;
