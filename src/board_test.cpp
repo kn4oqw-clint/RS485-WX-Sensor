@@ -958,7 +958,8 @@ static void as3935Soak(uint32_t seconds) {
     CONSOLE.print(seconds);
     CONSOLE.println(F(" s at current tuning"));
 
-    as3935Mask(0x00, 0xC1, (AS3935_OUTDOOR_MODE ? 0x0E : 0x12) << 1);
+    as3935Mask(0x00, 0xC1, (AS3935_OUTDOOR_MODE ? AS3935_OUTDOOR_GAIN
+                                                : AS3935_INDOOR_GAIN) << 1);
     as3935Mask(0x01, 0x8F, AS3935_NOISE_FLOOR << 4);
     as3935Mask(0x01, 0xF0, AS3935_WATCHDOG_THRESH & 0x0F);
     as3935Mask(0x02, 0xF0, AS3935_SPIKE_REJECT & 0x0F);
@@ -1016,6 +1017,71 @@ static void as3935Soak(uint32_t seconds) {
     } else {
         CONSOLE.println(F("  Quiet. Current tuning looks good for this site."));
     }
+}
+
+// A soak at deliberately reckless sensitivity: indoor AFE gain, noise
+// floor 0, watchdog 0, spike rejection 0. Indoors, surrounded by
+// switching supplies and a GPS, this SHOULD produce a flood of
+// disturbers. If it stays silent, the receive path is deaf and a clean
+// result at normal tuning means nothing.
+static void as3935SoakSensitive(uint32_t seconds) {
+    banner("AS3935 max-sensitivity soak");
+    CONSOLE.println(F("  indoor gain, noise floor 0, watchdog 0, spike 0"));
+    CONSOLE.println(F("  expecting a FLOOD — silence here means deaf"));
+
+    as3935Mask(0x00, 0xC1, AS3935_INDOOR_GAIN << 1);
+    as3935Mask(0x01, 0x8F, 0 << 4);
+    as3935Mask(0x01, 0xF0, 0);
+    as3935Mask(0x02, 0xF0, 0);
+    as3935Read(0x03);
+
+    uint32_t noise = 0, dist = 0, strikes = 0;
+    irqCount = 0;
+    attachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ), onLightningIRQ, RISING);
+
+    uint32_t start = millis(), lastReport = start;
+    while (millis() - start < seconds * 1000UL) {
+        if (irqCount) {
+            irqCount = 0;
+            delay(3);
+            uint8_t src = as3935Read(0x03) & 0x0F;
+            if (src == 0x01) noise++;
+            else if (src == 0x04) dist++;
+            else if (src == 0x08) strikes++;
+        }
+        if (millis() - lastReport >= 15000) {
+            lastReport = millis();
+            CONSOLE.print(F("  t="));
+            CONSOLE.print((millis() - start) / 1000);
+            CONSOLE.print(F("s  noise="));   CONSOLE.print(noise);
+            CONSOLE.print(F(" disturber=")); CONSOLE.println(dist);
+        }
+    }
+    detachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ));
+
+    CONSOLE.println();
+    CONSOLE.print(F("  TOTAL: noise="));  CONSOLE.print(noise);
+    CONSOLE.print(F(" disturber="));      CONSOLE.print(dist);
+    CONSOLE.print(F(" strikes="));        CONSOLE.println(strikes);
+
+    if (noise + dist + strikes == 0) {
+        CONSOLE.println(F("  DEAF. Nothing at maximum sensitivity indoors is"));
+        CONSOLE.println(F("  not plausible. The analog front end is not"));
+        CONSOLE.println(F("  hearing the antenna. Suspect the antenna solder"));
+        CONSOLE.println(F("  joints or a damaged AS3935 — SPI works fine, so"));
+        CONSOLE.println(F("  this is the RF side, not the digital side."));
+    } else {
+        CONSOLE.println(F("  Front end is alive. The quiet result at normal"));
+        CONSOLE.println(F("  tuning is real, not a dead receiver."));
+    }
+
+    // Restore configured tuning.
+    as3935Mask(0x00, 0xC1, (AS3935_OUTDOOR_MODE ? AS3935_OUTDOOR_GAIN
+                                                : AS3935_INDOOR_GAIN) << 1);
+    as3935Mask(0x01, 0x8F, AS3935_NOISE_FLOOR << 4);
+    as3935Mask(0x01, 0xF0, AS3935_WATCHDOG_THRESH & 0x0F);
+    as3935Mask(0x02, 0xF0, AS3935_SPIKE_REJECT & 0x0F);
+    as3935Read(0x03);
 }
 
 // ============================================================
@@ -1258,6 +1324,7 @@ static void printSummary() {
     CONSOLE.println(F("            s = set RTC from host: s2026-08-08 15:52:00"));
     CONSOLE.println(F("            p = force PPS 1Hz (no fix needed)  v = sky view"));
     CONSOLE.println(F("            n = AS3935 noise soak (120 s)"));
+    CONSOLE.println(F("            m = AS3935 max-sensitivity soak (60 s)"));
     CONSOLE.println(F("            b = reboot into DFU bootloader (no BOOT0)"));
     CONSOLE.println(F("============================================================"));
 }
@@ -1327,6 +1394,7 @@ void loop() {
             case 'p': testPPSForced(); break;
             case 'v': gpsSkyView(); break;
             case 'n': as3935Soak(120); break;
+            case 'm': as3935SoakSensitive(60); break;
             case 's': banner("DS3231 set from host"); setRTCFromHost(); break;
             case 'l': {
                 banner("AS3935 registers");

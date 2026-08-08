@@ -66,6 +66,8 @@
 // verified on the roof, not on the bench — see the 'c' and 'n' commands
 // in the board test.
 #define AS3935_OUTDOOR_MODE     1   // 1 = outdoor AFE gain, 0 = indoor
+#define AS3935_INDOOR_GAIN      0x12
+#define AS3935_OUTDOOR_GAIN     0x0E
 #define AS3935_NOISE_FLOOR      2   // 0..7, raise if noise interrupts flood
 #define AS3935_WATCHDOG_THRESH  2   // 0..15, raise if disturbers flood
 #define AS3935_SPIKE_REJECT     2   // 0..15, raise to reject non-lightning
