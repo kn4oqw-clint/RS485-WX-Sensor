@@ -13,21 +13,18 @@ static void onEdge() { edgeCount++; }
 // The lightning ISR must be detached while the pin is carrying the LCO
 // or interrupt counts, and restored afterwards by the caller.
 static void countEdges(uint16_t gateMs) {
+    // The gate is a few hundred ms against an 8 s watchdog, so feeding it
+    // either side is enough. Reloading inside the window was the only
+    // difference from the board-test version that measured correctly.
+    IWatchdog.reload();
     edgeCount = 0;
     attachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ), onEdge, RISING);
-    uint32_t t0 = millis();
-    while (millis() - t0 < gateMs) {
-        // Calibration outlasts the watchdog period, so keep it fed.
-        IWatchdog.reload();
-    }
+    delay(gateMs);
     detachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ));
+    IWatchdog.reload();
 }
 
 uint32_t as3935MeasureLco(AS3935 &dev, uint8_t tuningCap, uint16_t gateMs) {
-    // LCO_FDIV (reg 0x03 bits 7:6) = 00 -> divide by 16. Set it
-    // explicitly rather than trusting the reset default, because a
-    // wrong divider silently scales every measurement.
-    dev.maskRegisterBits(AS3935_REG_INT_MASK_ANT, 0x3F, 0x00);
     dev.maskRegisterBits(AS3935_REG_DISP_LCO, 0xF0, tuningCap & 0x0F);
     delay(3);
 
@@ -47,6 +44,11 @@ uint32_t as3935MeasureLco(AS3935 &dev, uint8_t tuningCap, uint16_t gateMs) {
 static bool tuneAntenna(AS3935 &dev, NodeCalib &out, Print *log) {
     if (log) log->println(F("  [1/2] antenna sweep"));
 
+    // LCO_FDIV (reg 0x03 bits 7:6) = 00 -> divide by 16. Once, up front:
+    // a wrong divider silently scales every reading in the sweep.
+    dev.maskRegisterBits(AS3935_REG_INT_MASK_ANT, 0x3F, 0x00);
+    delay(3);
+
     uint8_t  bestCap = 0;
     uint32_t bestHz  = 0;
     uint32_t bestErr = 0xFFFFFFFF;
@@ -55,13 +57,16 @@ static bool tuneAntenna(AS3935 &dev, NodeCalib &out, Print *log) {
         // Two passes averaged: the gate is short and a single pass can
         // be a count off, which is 160 Hz of apparent error.
         uint32_t a = as3935MeasureLco(dev, cap, AS3935_LCO_GATE_MS);
+        uint32_t rawA = edgeCount;
         uint32_t b = as3935MeasureLco(dev, cap, AS3935_LCO_GATE_MS);
+        (void)rawA;
         uint32_t hz = (a + b) / 2;
 
         uint32_t err = hz > AS3935_LCO_TARGET_HZ ? hz - AS3935_LCO_TARGET_HZ
                                                  : AS3935_LCO_TARGET_HZ - hz;
         if (log) {
             log->print(F("    cap ")); log->print(cap);
+            log->print(F("  edges ")); log->print(edgeCount);
             log->print(F("  ")); log->print(hz);
             log->print(F(" Hz  err "));
             log->print(hz ? (err * 100.0f) / AS3935_LCO_TARGET_HZ : 100.0f, 2);

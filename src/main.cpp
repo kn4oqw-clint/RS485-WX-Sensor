@@ -444,14 +444,20 @@ void setup() {
             calib.tempC    = (int8_t)dieT;
             calib.unixTime = rtcOk ? rtcUnix() : 0;
 
-            if (calibSave(calib)) {
+            if (!antennaOk) {
+                // Do not persist a failed antenna measurement: storing
+                // lco=0 would load as "calibrated" next boot and stop it
+                // ever retrying. Retry instead, on defaults meanwhile.
+                DBGLN(F("antenna measurement FAILED — not saving; using defaults"));
+                calib.tuningCap = AS3935_TUNING_CAP;
+                as3935ApplyCalib(lightning, calib);
+                calibValid = false;
+            } else if (calibSave(calib)) {
                 calibValid = true;
                 DBGLN(F("calibration saved"));
             } else {
                 DBGLN(F("calibration save FAILED — will re-run next boot"));
             }
-            if (!antennaOk)
-                DBGLN(F("WARNING: antenna out of spec, distances unreliable"));
         }
     } else {
         DBGLN(F("AS3935 FAILED"));
