@@ -52,7 +52,7 @@ static uint32_t measureLco(AS3935SPI &dev, uint8_t cap) {
     dev.displayLcoOnIrq(true);
 
     pinMode(PIN_AS3935_IRQ, INPUT);     // plain INPUT: the AS3935 drives it
-    delay(20);                          // let the oscillator settle
+    delay(40);                          // let the oscillator settle
 
     IWatchdog.reload();
     edgeCount = 0;
@@ -90,9 +90,15 @@ static bool tuneAntenna(AS3935SPI &dev, NodeCalib &out, Print *log) {
     uint32_t bestErr = 0xFFFFFFFF;
 
     for (uint8_t cap = 0; cap < 16; cap++) {
+        // Take the MAX of several attempts, not the first non-zero. Both
+        // error modes here — a missed edge and an unsettled oscillator —
+        // stretch the measured period and read LOW. Nothing reads high,
+        // so the largest reading is the closest to truth.
         uint32_t hz = 0;
-        for (uint8_t attempt = 0; attempt < 3 && hz == 0; attempt++)
-            hz = measureLco(dev, cap);
+        for (uint8_t attempt = 0; attempt < 3; attempt++) {
+            uint32_t m = measureLco(dev, cap);
+            if (m > hz) hz = m;
+        }
 
         uint32_t err = hz > 500000UL ? hz - 500000UL : 500000UL - hz;
         if (log) {
