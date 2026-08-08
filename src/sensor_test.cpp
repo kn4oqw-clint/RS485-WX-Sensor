@@ -65,8 +65,30 @@ static int8_t rawSpiWrite(uint8_t reg, const uint8_t *data, uint32_t len, void *
 
 static void rawDelayUs(uint32_t period, void *intf) { (void)intf; delayMicroseconds(period); }
 
+
+// Measure the real supply voltage using the MCU's internal reference.
+// VREFINT is a fixed bandgap; comparing it against the ADC full scale tells
+// us what VDDA actually is. The factory calibration value at 0x1FFF7A2A was
+// taken at exactly 3.3 V, so VDD = 3300 * cal / raw.
+//
+// This matters here because the BME680 hotplate is the most current-hungry
+// thing on the board, and the MAX485 on this design burned out with its
+// driver stuck enabled. A rail that sags under load would leave T/RH/P
+// working while the heater silently fails to reach temperature.
+static uint32_t readVddMv() {
+    analogReadResolution(12);
+    uint32_t raw = analogRead(AVREF);
+    if (raw == 0) return 0;
+    uint16_t cal = *((__IO uint16_t *)0x1FFF7A2AUL);   // VREFINT_CAL, STM32F4
+    if (cal == 0 || cal == 0xFFFF) return 0;
+    return (3300UL * (uint32_t)cal) / raw;
+}
+
 static bool rawForcedRead() {
     CONSOLE.println(F("\n---- Direct BME680 read (no BSEC) ----"));
+    CONSOLE.print(F("  VDD idle: "));
+    CONSOLE.print(readVddMv());
+    CONSOLE.println(F(" mV"));
 
     rawDev.intf     = BME68X_SPI_INTF;
     rawDev.read     = rawSpiRead;
@@ -152,7 +174,15 @@ static bool rawForcedRead() {
         if (bme68x_set_op_mode(BME68X_FORCED_MODE, &rawDev) != BME68X_OK) continue;
         uint32_t dly = bme68x_get_meas_dur(BME68X_FORCED_MODE, &rawConf, &rawDev)
                        + (uint32_t)hConf.heatr_dur * 1000UL;
-        delay(dly / 1000 + 30);
+
+        // Watch the rail while the hotplate is drawing current.
+        uint32_t vMin = 9999, vMax = 0;
+        uint32_t tEnd = millis() + dly / 1000 + 30;
+        while (millis() < tEnd) {
+            uint32_t v = readVddMv();
+            if (v) { if (v < vMin) vMin = v; if (v > vMax) vMax = v; }
+        }
+        if (vMin == 9999) vMin = 0;
 
         struct bme68x_data s;
         uint8_t sn = 0;
@@ -171,7 +201,9 @@ static bool rawForcedRead() {
         CONSOLE.print(F(" idac=")); CONSOLE.print(s.idac);
         CONSOLE.print(F(" gas_idx=")); CONSOLE.print(s.gas_index);
         CONSOLE.print(F(" T=")); CONSOLE.print(s.temperature, 2);
-        CONSOLE.println(F(" C"));
+        CONSOLE.print(F(" C  VDD ")); CONSOLE.print(vMin);
+        CONSOLE.print(F("-")); CONSOLE.print(vMax);
+        CONSOLE.println(F(" mV"));
         delay(200);
     }
 
