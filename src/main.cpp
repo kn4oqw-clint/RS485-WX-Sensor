@@ -311,6 +311,12 @@ static void runCalibration() {
     // The calibration routine drives the IRQ pin itself.
     detachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ));
 
+    // Silence the other interrupt sources: measuring a 31 kHz edge train
+    // is the one thing on this node that cannot tolerate ISR latency.
+    bool gpsWasAwake = !gpsIsAsleep();
+    if (gpsWasAwake) gpsSleep();
+    detachInterrupt(digitalPinToInterrupt(PIN_GPS_PPS));
+
     float dieT = 20.0f;
     rtcDieTemp(dieT);
 
@@ -330,6 +336,7 @@ static void runCalibration() {
     }
 
     attachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ), onLightningIrq, RISING);
+    if (gpsWasAwake) gpsWake();
     lastSampleMs = millis();
 }
 

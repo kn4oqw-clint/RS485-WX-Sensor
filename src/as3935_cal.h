@@ -32,6 +32,12 @@
 // distance estimates from an out-of-spec antenna are not trustworthy.
 bool as3935Calibrate(AS3935 &dev, NodeCalib &out, Print *log);
 
+// Diagnostics from the most recent LCO measurement.
+extern uint32_t as3935LastEdges;
+extern uint32_t as3935LastUs;
+extern uint8_t  as3935LastReg03;
+extern uint8_t  as3935LastReg08;
+
 // Programs stored values into the device. Always call this, whether the
 // calibration was just measured or loaded from EEPROM.
 void as3935ApplyCalib(AS3935 &dev, const NodeCalib &c);

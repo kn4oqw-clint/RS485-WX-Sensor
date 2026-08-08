@@ -64,6 +64,13 @@ uint32_t as3935MeasureLco(AS3935 &dev, uint8_t tuningCap, uint16_t /*unused*/) {
     uint32_t startUs = micros();
     attachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ), onEdge, RISING);
 
+    // The LCO runs at ~31 kHz — a 32 us period. Every other interrupt on
+    // the board (GPS UART, uplink UART, USB, PPS) is capable of delaying
+    // this handler past the next edge, and a missed edge stretches the
+    // measured period instead of registering as an error. Give this line
+    // the top priority for the duration of the count.
+    HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+
     // Expected duration at the target frequency, with generous slack.
     // Long enough for the slowest divider (/128 -> ~3.9 kHz -> 256 ms),
     // so a timeout means "no signal", not "wrong divider".
@@ -71,6 +78,7 @@ uint32_t as3935MeasureLco(AS3935 &dev, uint8_t tuningCap, uint16_t /*unused*/) {
     while (calEndUs == 0 && (int32_t)(millis() - deadline) < 0) { }
 
     detachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ));
+    HAL_NVIC_SetPriority(EXTI9_5_IRQn, 6, 0);      // back to normal
     IWatchdog.reload();
 
     dev.maskRegisterBits(AS3935_REG_DISP_LCO, 0x7F, 0x00);   // LCO off
