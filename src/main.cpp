@@ -25,7 +25,7 @@
 #include <IWatchdog.h>
 
 #include "config.h"
-#include "as3935.h"
+#include <AS3935SPI.h>
 #include "bme.h"
 #include "rtc.h"
 #include "gps.h"
@@ -45,7 +45,7 @@
 #endif
 
 // ---- Peripherals -------------------------------------------
-static AS3935 lightning(PIN_AS3935_CS, SPI);
+static AS3935SPI lightning(PIN_AS3935_CS, PIN_AS3935_IRQ);
 
 static RollingStats<SAMPLE_WINDOW_LEN> wTemp, wRh, wPress;
 
@@ -93,19 +93,20 @@ static void serviceLightning() {
     // Datasheet: wait 2 ms after the IRQ edge before reading the source
     // register. Read sooner and it returns 0x00 without clearing.
     delay(3);
-    uint8_t src = lightning.getInterruptSource();
+    uint8_t src = lightning.readInterruptSource();
 
-    if (src == AS3935_INT_LIGHTNING) {
-        uint8_t km = lightning.getDistanceEstimate();
+    if (src == AS3935MI::AS3935_INT_L) {
+        uint8_t km = lightning.readStormDistance();
         winStrikes++;
         lastStrikeMs = millis();
-        // 0x3F means "out of range" — not a distance.
-        if (km > 0 && km < 0x3F && (winNearestKm == 0 || km < winNearestKm))
+        // AS3935_DST_OOR (0x3F) means "out of range", not a distance.
+        if (km > 0 && km != AS3935MI::AS3935_DST_OOR &&
+            (winNearestKm == 0 || km < winNearestKm))
             winNearestKm = km;
         DBG(F("LIGHTNING ")); DBG(km); DBGLN(F(" km"));
-    } else if (src == AS3935_INT_DISTURBER) {
+    } else if (src == AS3935MI::AS3935_INT_D) {
         winDisturbers++;
-    } else if (src == AS3935_INT_NOISE) {
+    } else if (src == AS3935MI::AS3935_INT_NH) {
         // Noise trips mean the floor is set too low for this site. Count
         // them with disturbers so the hub can see the tuning is wrong.
         winDisturbers++;
@@ -423,7 +424,7 @@ void setup() {
     DBGLN(bmeOk ? F("BME680 OK (gas heater disabled)") : F("BME680 FAILED"));
 
     // ---- AS3935 ----
-    as3935Ok = lightning.begin();
+    as3935Ok = lightning.begin() && lightning.checkConnection();
     pinMode(PIN_AS3935_IRQ, INPUT);
 
     if (as3935Ok) {

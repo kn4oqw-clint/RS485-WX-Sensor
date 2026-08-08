@@ -2,46 +2,36 @@
 // ============================================================
 // as3935_cal.h — site calibration for the AS3935.
 //
-// Two stages, roughly two minutes total:
+// Split by who does it better:
 //
-//   1. Antenna tuning (~15 s). The LCO tank must resonate within 3.5%
-//      of 500 kHz. Register 0x08 bit 7 puts the oscillator on the IRQ
-//      pin divided by 16, so we sweep all 16 tuning-cap values and
-//      count edges to find the closest. Adding capacitance only ever
-//      LOWERS the frequency, so if the antenna already sits below
-//      500 kHz at cap 0 there is no upward trim available — the sweep
-//      reports that rather than silently picking the least-bad value.
+//   ANTENNA resonance -> AS3935MI::calibrateResonanceFrequency().
+//     Getting this right is fiddly in ways that are not obvious: the LCO
+//     appears on the IRQ pin at ~31 kHz, and any approach that counts
+//     edges in a fixed window silently reports a LOWER frequency when it
+//     misses edges — indistinguishable from a genuinely detuned antenna.
+//     The library counts a fixed number of edges and times them, so a
+//     failure times out instead of lying. A hand-rolled version of this
+//     cost several rounds of debugging before being replaced.
 //
-//   2. Environment tuning (~100 s). Noise floor and watchdog threshold
-//      depend entirely on what is near the installed node, which is why
-//      this cannot be done on a bench. Start over-sensitive and raise
-//      each threshold only until the interrupt rate is sane. Starting
-//      permissive and lowering would take longer to converge and risks
-//      settling on a threshold that misses real strikes.
+//   ENVIRONMENT (noise floor, watchdog) -> our code, below.
+//     No library does this: it depends entirely on the RF environment at
+//     the installed site, which is exactly why it cannot be done on a
+//     bench. Start over-sensitive, raise each threshold only until the
+//     interrupt rate is sane.
 //
-// The result is persisted, so this runs once per site rather than once
-// per boot. See calib.h.
+// Results are persisted (see calib.h) so this runs once per site rather
+// than on every boot of a node that is expected to brown out.
 // ============================================================
 
 #include <Arduino.h>
-#include "as3935.h"
+#include <AS3935SPI.h>
 #include "calib.h"
 
-// Runs the full sweep. log may be NULL. Returns false if the antenna
-// cannot be brought into spec — the node still runs, but lightning
-// distance estimates from an out-of-spec antenna are not trustworthy.
-bool as3935Calibrate(AS3935 &dev, NodeCalib &out, Print *log);
+// Runs both stages. log may be NULL. Returns false if the antenna could
+// not be tuned to within 3.5% of 500 kHz — the node still runs, but
+// lightning distance estimates should not be trusted.
+bool as3935Calibrate(AS3935SPI &dev, NodeCalib &out, Print *log);
 
-// Diagnostics from the most recent LCO measurement.
-extern uint32_t as3935LastEdges;
-extern uint32_t as3935LastUs;
-extern uint8_t  as3935LastReg03;
-extern uint8_t  as3935LastReg08;
-
-// Programs stored values into the device. Always call this, whether the
+// Programs stored values into the device. Call this whether the
 // calibration was just measured or loaded from EEPROM.
-void as3935ApplyCalib(AS3935 &dev, const NodeCalib &c);
-
-// Measures the antenna at one tuning-cap setting. Exposed so the board
-// test can sweep without duplicating the edge-counting logic.
-uint32_t as3935MeasureLco(AS3935 &dev, uint8_t tuningCap, uint16_t gateMs);
+void as3935ApplyCalib(AS3935SPI &dev, const NodeCalib &c);
