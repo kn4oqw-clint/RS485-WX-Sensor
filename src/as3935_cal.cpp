@@ -28,19 +28,38 @@ static bool tuneAntenna(AS3935SPI &dev, NodeCalib &out, Print *log) {
     // would be silently undone the moment the library attaches its own
     // ISR. See the comment in platformio.ini.
 
-    // Confirm the pin actually carries the oscillator before trusting
-    // any frequency from it. ~14 ms, and it fails loudly instead of
-    // returning a plausible wrong number.
+    // checkIRQ() is only a sanity gate, and a strict one: 128 edges
+    // inside a 20 ms timeout. Report it, but do not let it veto the
+    // calibration — the real measurement uses far longer timeouts and
+    // can succeed where this fails.
     IWatchdog.reload();
-    if (!dev.checkIRQ()) {
-        if (log) log->println(F("    checkIRQ FAILED — no LCO on the IRQ pin"));
-        return false;
+    bool irqSeen = dev.checkIRQ();
+    if (log) {
+        log->print(F("    checkIRQ: "));
+        log->println(irqSeen ? F("LCO present") : F("no edges seen (advisory)"));
     }
+
+    // Sweep every tuning cap. The library's default narrows the search by
+    // interpolating between cap 0 and cap 15, which assumes a monotonic
+    // response — but this antenna sits at the end of its trim range, so
+    // the interpolation has nothing useful to work with.
+    dev.setCalibrateAllAntCap(true);
 
     IWatchdog.reload();
     int32_t freq = 0;
     bool ok = dev.calibrateResonanceFrequency(freq);
     IWatchdog.reload();
+
+    if (log) {
+        // Per-cap results, so a bad sweep is diagnosable in one run.
+        for (uint8_t c = 0; c < 16; c++) {
+            int32_t f = dev.getAntCapFrequency(c);
+            if (f <= 0) continue;
+            log->print(F("      cap ")); log->print(c);
+            log->print(F(" -> "));       log->print(f);
+            log->println(F(" Hz"));
+        }
+    }
 
     out.tuningCap = dev.readAntennaTuning();
     out.lcoHz     = (freq > 0) ? (uint32_t)freq : 0;
