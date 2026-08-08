@@ -22,16 +22,11 @@ static bool tuneAntenna(AS3935SPI &dev, NodeCalib &out, Print *log) {
     // measurement, so nothing of ours may be attached here.
     dev.setInterruptMode(AS3935MI::AS3935_INTERRUPT_DETACHED);
 
-    // The LCO appears on the IRQ pin at ~31 kHz — a 32 us period. At
-    // STM32duino's default EXTI priority, the GPS UART, uplink UART and
-    // USB handlers delay this line enough to drop most of the edge
-    // train, and the library's timeout is a tight 2x expected duration,
-    // so it gives up. Measured: default priority loses up to 90% of
-    // edges; at priority 0 the loss is under 10%.
-    //
-    // This is a property of THIS board's interrupt load, not a library
-    // shortcoming — it has no way to know what else is running.
-    HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+    // NOTE: EXTI priority is raised globally via -D EXTI_IRQ_PRIO=0 in
+    // platformio.ini, NOT here. STM32duino re-applies EXTI_IRQ_PRIO
+    // inside every attachInterrupt(), so setting it around this call
+    // would be silently undone the moment the library attaches its own
+    // ISR. See the comment in platformio.ini.
 
     // Confirm the pin actually carries the oscillator before trusting
     // any frequency from it. ~14 ms, and it fails loudly instead of
@@ -39,7 +34,6 @@ static bool tuneAntenna(AS3935SPI &dev, NodeCalib &out, Print *log) {
     IWatchdog.reload();
     if (!dev.checkIRQ()) {
         if (log) log->println(F("    checkIRQ FAILED — no LCO on the IRQ pin"));
-        HAL_NVIC_SetPriority(EXTI9_5_IRQn, 6, 0);
         return false;
     }
 
@@ -72,7 +66,6 @@ static bool tuneAntenna(AS3935SPI &dev, NodeCalib &out, Print *log) {
     if (!dev.calibrateRCO() && log)
         log->println(F("    RCO calibration reported failure"));
 
-    HAL_NVIC_SetPriority(EXTI9_5_IRQn, 6, 0);      // back to normal
     return ok;
 }
 
