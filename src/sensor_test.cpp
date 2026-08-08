@@ -311,7 +311,50 @@ void setup() {
     CONSOLE.println(F("  Temperature and pressure are valid immediately.\n"));
 }
 
+// Diagnostics that only run once in setup() are lost if nobody is attached
+// during the 10 s startup window. Re-run them on a timer and on demand, and
+// allow a remote reset, so attaching at any moment yields data.
+static void serviceConsole() {
+    // 1200-baud touch: the host opening the port at 1200 baud triggers a
+    // reset. NVIC_SystemReset() is a plain reset — reliable, unlike the DFU
+    // jump in the board test, because nothing has to survive it.
+    if (CONSOLE.baud() == 1200) {
+        CONSOLE.println(F("\n1200 baud touch — resetting"));
+        CONSOLE.flush();
+        delay(100);
+        NVIC_SystemReset();
+    }
+
+    if (!CONSOLE.available()) return;
+    switch (CONSOLE.read()) {
+        case 'r':
+        case 'h':
+            rawForcedRead();
+            break;
+        case 'x':
+            CONSOLE.println(F("resetting"));
+            CONSOLE.flush();
+            delay(100);
+            NVIC_SystemReset();
+            break;
+        default: break;
+    }
+}
+
 void loop() {
+    serviceConsole();
+
+    // While the gas channel is failing, repeat the heater diagnostic so the
+    // result is never more than a minute away.
+    static uint32_t lastSoak = 0;
+    if (bme.bsecStatus != BSEC_OK && millis() - lastSoak > 60000) {
+        lastSoak = millis();
+        CONSOLE.print(F("\n=== periodic re-check at "));
+        CONSOLE.print(millis() / 1000);
+        CONSOLE.println(F(" s ==="));
+        rawForcedRead();
+    }
+
     if (!bmeOk) {
         digitalWrite(PIN_LED, LOW); delay(100);
         digitalWrite(PIN_LED, HIGH); delay(900);
