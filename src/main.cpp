@@ -326,7 +326,7 @@ static void runCalibration() {
     calib.tempC    = (int8_t)dieT;
     calib.unixTime = rtcOk ? rtcUnix() : 0;
 
-    if (!antennaOk) {
+    if (calib.lcoHz == 0) {
         DBGLN(F("antenna measurement FAILED — not saving"));
         calib.tuningCap = AS3935_TUNING_CAP;
         as3935ApplyCalib(lightning, calib);
@@ -334,6 +334,9 @@ static void runCalibration() {
     } else {
         calibValid = calibSave(calib);
         DBGLN(calibValid ? F("calibration saved") : F("calibration save FAILED"));
+        if (!antennaOk)
+            DBGLN(F("NOTE: antenna out of spec — detection works, "
+                    "distance estimates are approximate"));
     }
 
     attachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ), onLightningIrq, RISING);
@@ -458,10 +461,9 @@ void setup() {
             calib.tempC    = (int8_t)dieT;
             calib.unixTime = rtcOk ? rtcUnix() : 0;
 
-            if (!antennaOk) {
-                // Do not persist a failed antenna measurement: storing
-                // lco=0 would load as "calibrated" next boot and stop it
-                // ever retrying. Retry instead, on defaults meanwhile.
+            if (calib.lcoHz == 0) {
+                // No signal at all. Storing lco=0 would load as
+                // "calibrated" next boot and stop it ever retrying.
                 DBGLN(F("antenna measurement FAILED — not saving; using defaults"));
                 calib.tuningCap = AS3935_TUNING_CAP;
                 as3935ApplyCalib(lightning, calib);
@@ -472,6 +474,9 @@ void setup() {
             } else {
                 DBGLN(F("calibration save FAILED — will re-run next boot"));
             }
+            if (!antennaOk)
+                DBGLN(F("NOTE: antenna out of spec — detection works, "
+                        "distance estimates are approximate"));
         }
     } else {
         DBGLN(F("AS3935 FAILED"));
