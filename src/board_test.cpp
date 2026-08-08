@@ -1242,9 +1242,17 @@ static void sweepLCO() {
 // ============================================================
 // Jump to the STM32 system DFU bootloader on command.
 //
-// Saves a trip to the board for every reflash: no BOOT0 jumper, no reset
-// button. The part re-enumerates as 0483:df11 and dfu-util can take it
-// from there. Only in the test firmware — the flight build must never
+// UNRELIABLE — measured 2 successes in 5 attempts on this board. When it
+// fails the chip drops off USB entirely and needs a power cycle, so it is
+// no cheaper than just holding BOOT0. Use BOOT0 by default.
+//
+// The remaining flakiness is in the jump itself: HAL_RCC_DeInit() drops
+// the clocks to HSI and the system bootloader does not always come up
+// cleanly from that state. The robust fix is to stash a magic value and
+// NVIC_SystemReset(), then jump from the top of setup() before USB is
+// initialised — but this linker script has no .noinit section, so that
+// needs either linker changes or RTC backup registers. Not worth it for a
+// bench tool. Only in the test firmware — the flight build must never
 // expose a way to brick itself remotely.
 // ============================================================
 static void jumpToBootloader() {
@@ -1325,7 +1333,7 @@ static void printSummary() {
     CONSOLE.println(F("            p = force PPS 1Hz (no fix needed)  v = sky view"));
     CONSOLE.println(F("            n = AS3935 noise soak (120 s)"));
     CONSOLE.println(F("            m = AS3935 max-sensitivity soak (60 s)"));
-    CONSOLE.println(F("            b = reboot into DFU bootloader (no BOOT0)"));
+    CONSOLE.println(F("            b = DFU jump (UNRELIABLE ~40% - prefer BOOT0)"));
     CONSOLE.println(F("============================================================"));
 }
 
