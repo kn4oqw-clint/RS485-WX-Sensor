@@ -136,9 +136,58 @@ static bool rawForcedRead() {
                 d.humidity   >=  0.0f && d.humidity   <= 100.0f &&
                 d.pressure   > 30000  && d.pressure   < 110000;
 
-    CONSOLE.println(sane ? F("  VALUES ARE SANE — sensor and SPI are fine,")
+    CONSOLE.println(sane ? F("  T/RH/P are sane — sensor and SPI are fine.")
                          : F("  VALUES ARE GARBAGE — sensor or SPI path fault."));
-    if (sane) CONSOLE.println(F("  so the -2 is about how BSEC is being driven."));
+
+    // ---- Heater soak ---------------------------------------
+    CONSOLE.println(F("\n  Heater soak — heat_stab must reach 1 and gas must"));
+    CONSOLE.println(F("  fall into the kOhm..MOhm range. A cold hotplate reads"));
+    CONSOLE.println(F("  tens of MOhm, and BSEC rejects that as out of range."));
+
+    uint8_t stabCount = 0;
+    float   lastGas   = 0;
+    for (uint8_t i = 0; i < 10; i++) {
+        bme68x_set_heatr_conf(BME68X_FORCED_MODE, &hConf, &rawDev);
+        if (bme68x_set_op_mode(BME68X_FORCED_MODE, &rawDev) != BME68X_OK) continue;
+        uint32_t dly = bme68x_get_meas_dur(BME68X_FORCED_MODE, &rawConf, &rawDev)
+                       + hConf.heatr_dur * 1000;
+        delayMicroseconds(dly);
+        delay(20);
+
+        struct bme68x_data s;
+        uint8_t sn = 0;
+        if (bme68x_get_data(BME68X_FORCED_MODE, &s, &sn, &rawDev) != BME68X_OK || sn == 0)
+            continue;
+
+        bool stab = (s.status & 0x10) != 0;
+        if (stab) stabCount++;
+        lastGas = s.gas_resistance;
+
+        CONSOLE.print(F("    ")); CONSOLE.print(i + 1);
+        CONSOLE.print(F(": heat_stab=")); CONSOLE.print(stab ? 1 : 0);
+        CONSOLE.print(F("  gas_valid=")); CONSOLE.print((s.status & 0x20) ? 1 : 0);
+        CONSOLE.print(F("  gas=")); CONSOLE.print(s.gas_resistance, 0);
+        CONSOLE.print(F(" ohm  T=")); CONSOLE.print(s.temperature, 2);
+        CONSOLE.println(F(" C"));
+        delay(200);
+    }
+
+    CONSOLE.print(F("\n  heat_stab set in ")); CONSOLE.print(stabCount);
+    CONSOLE.println(F("/10 measurements"));
+
+    if (stabCount == 0) {
+        CONSOLE.println(F("  HEATER NEVER STABILISED. The gas hotplate is not"));
+        CONSOLE.println(F("  reaching temperature. T/RH/P will still be correct,"));
+        CONSOLE.println(F("  but gas/IAQ/CO2/bVOC can never work. Check the 3V3"));
+        CONSOLE.println(F("  supply can source the heater current, then suspect"));
+        CONSOLE.println(F("  a damaged sensor."));
+    } else if (lastGas > 2000000.0f) {
+        CONSOLE.println(F("  Heater stabilises but gas is still very high."));
+        CONSOLE.println(F("  Plausible in very clean air, but this is the"));
+        CONSOLE.println(F("  value BSEC is rejecting."));
+    } else {
+        CONSOLE.println(F("  Heater works and gas is in a normal range."));
+    }
     return sane;
 }
 
@@ -269,7 +318,7 @@ void loop() {
         return;
     }
 
-    if (!bme.run()) return;
+    if (!bme.run()) { checkBsecStatus(); return; }
     checkBsecStatus();
 
     sampleCount++;
