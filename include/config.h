@@ -9,7 +9,10 @@
 #include <Arduino.h>
 
 // ---- Node identity -----------------------------------------
-#define NODE_ID "wx-01"
+#define NODE_ID  "wx-01"
+// Numeric id on the wire — one byte instead of a string, since the mesh
+// side only needs to tell nodes apart.
+#define NODE_NUM 1
 
 // ---- Debug console -----------------------------------------
 // USBCON + USBD_USE_CDC means the core #defines Serial -> SerialUSB

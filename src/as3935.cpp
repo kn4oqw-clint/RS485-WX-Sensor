@@ -34,7 +34,21 @@ void AS3935::reset() {
 void AS3935::calibrate() {
     // Trigger RC oscillator calibration
     writeRegister(AS3935_REG_CALIB, 0x96);
-    delay(2);
+    delay(3);
+
+    // CALIB_RCO is NOT complete when the command returns. The datasheet
+    // requires displaying TRCO on the IRQ pin and switching it off again.
+    // Skip this and the chip leaves IRQ asserted with an interrupt source
+    // of 0x00 — which reads exactly like a stuck IRQ line and cannot be
+    // cleared by reading register 0x03. Cost real debugging time during
+    // bring-up; do not "simplify" it away.
+    maskRegisterBits(AS3935_REG_DISP_LCO, 0xDF, 0x20);   // DISP_TRCO on
+    delay(3);
+    maskRegisterBits(AS3935_REG_DISP_LCO, 0xDF, 0x00);   // DISP_TRCO off
+    delay(3);
+
+    readRegister(AS3935_REG_INT_MASK_ANT);               // drain the interrupt
+    delay(3);
 }
 
 void AS3935::setIndoor() {
