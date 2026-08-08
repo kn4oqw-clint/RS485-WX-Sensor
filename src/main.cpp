@@ -140,7 +140,7 @@ static void takeSample() {
 // ============================================================
 // Reporting
 // ============================================================
-static void sendReport() {
+static void sendReport(bool clearWindow) {
     WeatherPayload p = {};
 
     p.unixTime = rtcOk ? rtcUnix() : 0;
@@ -203,9 +203,12 @@ static void sendReport() {
 #endif
 
     // Counters are per-window; the stats windows roll on their own so
-    // trends survive across reports.
-    winStrikes = winDisturbers = 0;
-    winNearestKm = 0;
+    // trends survive across reports. A report forced from the console
+    // leaves them alone — testing the link should not destroy data.
+    if (clearWindow) {
+        winStrikes = winDisturbers = 0;
+        winNearestKm = 0;
+    }
 }
 
 // ============================================================
@@ -260,6 +263,107 @@ static void serviceGpsSync() {
         lastGpsSyncMs = millis();
     }
 }
+
+
+// ============================================================
+// Debug console. Compiled out entirely when DEBUG is 0 — the flight
+// build must not expose a way to trigger a two-minute calibration or a
+// reset on a node that is up a ladder.
+// ============================================================
+#if DEBUG
+static void printStatus() {
+    RtcTime t;
+    DBGLN(F("\n---- status ----"));
+    DBG(F("  uptime   ")); DBG(millis() / 1000); DBGLN(F(" s"));
+    if (rtcOk && rtcRead(t)) {
+        DBG(F("  rtc      ")); DBG(t.year); DBG('-'); DBG(t.month); DBG('-');
+        DBG(t.day); DBG(' '); DBG(t.hour); DBG(':'); DBG(t.minute);
+        DBG(':'); DBG(t.second); DBGLN(rtcOscStopped() ? F("  OSF SET") : F("  UTC"));
+    } else {
+        DBGLN(F("  rtc      unavailable"));
+    }
+    DBG(F("  bme680   ")); DBGLN(bmeOk ? F("ok (gas heater disabled)") : F("FAILED"));
+    DBG(F("  as3935   ")); DBGLN(as3935Ok ? F("ok") : F("FAILED"));
+    if (calibValid) {
+        DBG(F("  calib    cap=")); DBG(calib.tuningCap);
+        DBG(F(" lco="));   DBG(calib.lcoHz);
+        DBG(F(" floor=")); DBG(calib.noiseFloor);
+        DBG(F(" wd="));    DBG(calib.watchdog);
+        DBG(F(" @"));      DBG(calib.tempC); DBGLN(F("C"));
+    } else {
+        DBGLN(F("  calib    NONE STORED"));
+    }
+    DBG(F("  samples  ")); DBG(wTemp.size()); DBG('/'); DBGLN(SAMPLE_WINDOW_LEN);
+    DBG(F("  window   strikes=")); DBG(winStrikes);
+    DBG(F(" disturbers=")); DBGLN(winDisturbers);
+    DBG(F("  vdd      ")); DBG(readVddMv()); DBGLN(F(" mV"));
+    DBG(F("  gps      "));
+    if (gpsIsAsleep()) DBGLN(F("asleep"));
+    else { DBG(gpsSatellites()); DBGLN(gpsHasFix() ? F(" sats, FIX") : F(" sats, no fix")); }
+    DBG(F("  uplink   USART2 PA2/PA3 @ ")); DBG(UPLINK_BAUD); DBGLN(F(" 8N1"));
+    DBG(F("  next rpt ")); DBG((REPORT_INTERVAL_MS - (millis() - lastReportMs)) / 1000);
+    DBGLN(F(" s"));
+}
+
+static void runCalibration() {
+    if (!as3935Ok) { DBGLN(F("AS3935 not present")); return; }
+
+    // The calibration routine drives the IRQ pin itself.
+    detachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ));
+
+    float dieT = 20.0f;
+    rtcDieTemp(dieT);
+
+    memset(&calib, 0, sizeof(calib));
+    bool antennaOk = as3935Calibrate(lightning, calib, &CONSOLE);
+    calib.tempC    = (int8_t)dieT;
+    calib.unixTime = rtcOk ? rtcUnix() : 0;
+
+    calibValid = calibSave(calib);
+    DBGLN(calibValid ? F("calibration saved") : F("calibration save FAILED"));
+    if (!antennaOk) DBGLN(F("WARNING: antenna out of spec"));
+
+    attachInterrupt(digitalPinToInterrupt(PIN_AS3935_IRQ), onLightningIrq, RISING);
+    lastSampleMs = millis();
+}
+
+static void printHelp() {
+    DBGLN(F("\n  r  send a report now (does not clear the window)"));
+    DBGLN(F("  s  status"));
+    DBGLN(F("  c  run site calibration now (~2 min) and save"));
+    DBGLN(F("  i  invalidate stored calibration (re-runs next boot)"));
+    DBGLN(F("  g  wake GPS and sync the RTC now"));
+    DBGLN(F("  x  reset"));
+    DBGLN(F("  ?  this help"));
+}
+
+static void serviceConsole() {
+    // 1200-baud touch resets the board, so a host can restart it without
+    // touching the hardware. A plain reset, not a bootloader jump.
+    if (CONSOLE.baud() == 1200) {
+        DBGLN(F("1200 baud touch — resetting"));
+        CONSOLE.flush();
+        delay(100);
+        NVIC_SystemReset();
+    }
+    if (!CONSOLE.available()) return;
+    switch (CONSOLE.read()) {
+        case 'r': sendReport(false); break;
+        case 's': printStatus(); break;
+        case 'c': runCalibration(); break;
+        case 'i': calibInvalidate(); calibValid = false;
+                  DBGLN(F("stored calibration erased")); break;
+        case 'g': lastGpsSyncMs = millis() - GPS_SYNC_INTERVAL_MS;
+                  DBGLN(F("GPS sync requested")); break;
+        case 'x': DBGLN(F("resetting")); CONSOLE.flush(); delay(100);
+                  NVIC_SystemReset(); break;
+        case '?': printHelp(); break;
+        default:  break;
+    }
+}
+#else
+static void serviceConsole() {}
+#endif
 
 // ============================================================
 void setup() {
@@ -379,12 +483,13 @@ void setup() {
     // Already started before calibration if the AS3935 came up; IWDG
     // cannot be re-initialised once running.
     if (!as3935Ok) IWatchdog.begin(IWDG_TIMEOUT_MS * 1000UL);
-    DBGLN(F("running\n"));
+    DBGLN(F("running — press ? for commands\n"));
 }
 
 void loop() {
     IWatchdog.reload();
 
+    serviceConsole();
     serviceLightning();
 
     if (millis() - lastSampleMs >= SAMPLE_INTERVAL_MS) {
@@ -394,7 +499,7 @@ void loop() {
 
     if (millis() - lastReportMs >= REPORT_INTERVAL_MS) {
         lastReportMs = millis();
-        sendReport();
+        sendReport(true);
     }
 
     serviceGpsSync();
